@@ -1,0 +1,151 @@
+"""Protocol-level tests for the MCP server.
+
+The tool-surface contract lives in `test_browser.py`, which owns the browser-only
+surface. This file covers only the JSON-RPC plumbing, so the transport and the
+product surface can change independently.
+"""
+
+from __future__ import annotations
+
+import os
+
+import pytest
+
+from jev_use import mcp_server
+
+
+def test_initialize_reports_the_server_identity() -> None:
+    response = mcp_server.handle(
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {"protocolVersion": "2025-06-18"},
+        }
+    )
+    assert response["result"]["serverInfo"] == {
+        "name": mcp_server.SERVER_NAME,
+        "version": mcp_server.SERVER_VERSION,
+    }
+    assert response["result"]["protocolVersion"] == mcp_server.PROTOCOL_VERSION
+    assert "tools" in response["result"]["capabilities"]
+
+
+def test_notifications_produce_no_response() -> None:
+    assert mcp_server.handle({"jsonrpc": "2.0", "method": "notifications/initialized"}) is None
+    assert mcp_server.handle({"jsonrpc": "2.0", "method": "notifications/cancelled"}) is None
+
+
+def test_tools_list_returns_the_registry() -> None:
+    response = mcp_server.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+    returned = [t["name"] for t in response["result"]["tools"]]
+    assert returned == [t["name"] for t in mcp_server.TOOLS]
+
+
+def test_unknown_method_is_reported() -> None:
+    response = mcp_server.handle({"jsonrpc": "2.0", "id": 3, "method": "nonsense"})
+    assert response["error"]["code"] == -32601
+
+
+def test_ping() -> None:
+    assert mcp_server.handle({"jsonrpc": "2.0", "id": 4, "method": "ping"})["result"] == {}
+
+
+def test_a_request_without_an_id_gets_no_reply() -> None:
+    assert mcp_server.handle({"jsonrpc": "2.0", "method": "some/request"}) is None
+
+
+def test_unexpected_exceptions_become_error_results(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A crashing tool must not take the server down."""
+
+    def boom(_args):
+        raise RuntimeError("kaboom")
+
+    monkeypatch.setitem(mcp_server.HANDLERS, "browser_read", boom)
+    response = mcp_server.handle(
+        {
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "tools/call",
+            "params": {"name": "browser_read", "arguments": {}},
+        }
+    )
+    assert response["result"]["isError"] is True
+    assert "kaboom" in response["result"]["content"][0]["text"]
+
+
+# -- prompts ----------------------------------------------------------------
+
+
+def test_prompts_list_exposes_browser_use() -> None:
+    """The slash-command entry point: the user types /browser-use in any harness."""
+    response = mcp_server.handle({"jsonrpc": "2.0", "id": 7, "method": "prompts/list"})
+    names = [p["name"] for p in response["result"]["prompts"]]
+    assert names == ["browser-use"]
+    assert response["result"]["prompts"][0]["arguments"][0]["required"] is True
+
+
+def test_prompts_get_returns_instructions_containing_the_task() -> None:
+    response = mcp_server.handle(
+        {
+            "jsonrpc": "2.0",
+            "id": 8,
+            "method": "prompts/get",
+            "params": {"name": "browser-use", "arguments": {"task": "check the usage page"}},
+        }
+    )
+    text = response["result"]["messages"][0]["content"]["text"]
+    assert "check the usage page" in text
+    assert "browser_profiles" in text, "must send the model to discovery first"
+    assert "browser_read" in text, "must name the step that actually answers"
+
+
+def test_the_prompt_routes_to_browser_open_when_nothing_is_drivable() -> None:
+    """The ten-turn spiral came from retrying an unrecoverable state.
+
+    The fix is not 'stop' — it is 'call browser_open', which actually opens a
+    profile from a copy. The prompt must name that tool.
+    """
+    response = mcp_server.handle(
+        {"jsonrpc": "2.0", "id": 9, "method": "prompts/get",
+         "params": {"name": "browser-use", "arguments": {"task": "x"}}}
+    )
+    text = response["result"]["messages"][0]["content"]["text"]
+    assert "browser_open" in text
+    assert "Never substitute a different browser" in text
+
+
+def test_unknown_prompt_is_an_error() -> None:
+    response = mcp_server.handle(
+        {"jsonrpc": "2.0", "id": 10, "method": "prompts/get", "params": {"name": "nope"}}
+    )
+    assert response["error"]["code"] == -32602
+
+
+def test_initialize_advertises_prompts() -> None:
+    response = mcp_server.handle(
+        {"jsonrpc": "2.0", "id": 11, "method": "initialize", "params": {}}
+    )
+    assert "prompts" in response["result"]["capabilities"]
+
+
+def test_handlers_cover_every_declared_tool() -> None:
+    declared = {t["name"] for t in mcp_server.TOOLS}
+    assert declared == set(mcp_server.HANDLERS)
+
+
+def test_load_env_does_not_clobber_an_existing_value(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / ".env").write_text("JEV_TEST_KEY=fromfile\n")
+    monkeypatch.setattr(mcp_server, "__file__", str(tmp_path / "pkg" / "mcp_server.py"))
+    monkeypatch.setenv("JEV_TEST_KEY", "fromenv")
+
+    mcp_server.load_env()
+    assert os.environ["JEV_TEST_KEY"] == "fromenv", "an explicit env var must win"
+
+
+def test_load_env_survives_a_missing_file(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    monkeypatch.setattr(mcp_server, "__file__", str(tmp_path / "pkg" / "mcp_server.py"))
+    mcp_server.load_env()

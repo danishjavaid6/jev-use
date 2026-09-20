@@ -1,0 +1,24 @@
+# credentials
+.env
+.env.*
+!.env.example
+
+# python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+
+# node
+node_modules/
+npm-debug.log*
+*.tgz
+
+# local run artifacts
+runs/
+fixtures/*-live.json
+
+# cached action plans (local, machine-specific)
+.jev-cache.json
+.jev-browser-cache.json

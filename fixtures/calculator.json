@@ -1,0 +1,163 @@
+{
+  "_note": "Synthetic window snapshot used for credential-free testing and replay. Field names mirror a real cua-driver get_window_state payload, so snapshots saved with --dump-fixture replay through the same code path.",
+  "pid": 4242,
+  "window_id": 90001,
+  "window_title": "Calculator",
+  "window_bounds": { "x": 100, "y": 100, "width": 320, "height": 480 },
+  "elements": [
+    {
+      "element_index": 0,
+      "element_token": "p1:0",
+      "role": "frame",
+      "label": "Calculator",
+      "value": null,
+      "actions": [],
+      "frame": { "x": 0, "y": 0, "w": 320, "h": 480 },
+      "parent_index": null,
+      "depth": 0
+    },
+    {
+      "element_index": 1,
+      "element_token": "p1:1",
+      "role": "label",
+      "label": "Result",
+      "value": "0",
+      "actions": [],
+      "frame": { "x": 20, "y": 40, "w": 280, "h": 60 },
+      "parent_index": 0,
+      "depth": 1
+    },
+    {
+      "element_index": 2,
+      "element_token": "p1:2",
+      "role": "push button",
+      "label": "Clear",
+      "value": null,
+      "actions": ["press"],
+      "frame": { "x": 20, "y": 130, "w": 60, "h": 50 },
+      "parent_index": 0,
+      "depth": 1
+    },
+    {
+      "element_index": 3,
+      "element_token": "p1:3",
+      "role": "push button",
+      "label": "7",
+      "value": null,
+      "actions": ["press"],
+      "frame": { "x": 20, "y": 200, "w": 60, "h": 50 },
+      "parent_index": 0,
+      "depth": 1
+    },
+    {
+      "element_index": 4,
+      "element_token": "p1:4",
+      "role": "push button",
+      "label": "8",
+      "value": null,
+      "actions": ["press"],
+      "frame": { "x": 90, "y": 200, "w": 60, "h": 50 },
+      "parent_index": 0,
+      "depth": 1
+    },
+    {
+      "element_index": 5,
+      "element_token": "p1:5",
+      "role": "push button",
+      "label": "9",
+      "value": null,
+      "actions": ["press"],
+      "frame": { "x": 160, "y": 200, "w": 60, "h": 50 },
+      "parent_index": 0,
+      "depth": 1
+    },
+    {
+      "element_index": 6,
+      "element_token": "p1:6",
+      "role": "push button",
+      "label": "Multiply",
+      "value": null,
+      "actions": ["press"],
+      "frame": { "x": 230, "y": 200, "w": 60, "h": 50 },
+      "parent_index": 0,
+      "depth": 1
+    },
+    {
+      "element_index": 7,
+      "element_token": "p1:7",
+      "role": "push button",
+      "label": "4",
+      "value": null,
+      "actions": ["press"],
+      "frame": { "x": 20, "y": 260, "w": 60, "h": 50 },
+      "parent_index": 0,
+      "depth": 1
+    },
+    {
+      "element_index": 8,
+      "element_token": "p1:8",
+      "role": "push button",
+      "label": "5",
+      "value": null,
+      "actions": ["press"],
+      "frame": { "x": 90, "y": 260, "w": 60, "h": 50 },
+      "parent_index": 0,
+      "depth": 1
+    },
+    {
+      "element_index": 9,
+      "element_token": "p1:9",
+      "role": "push button",
+      "label": "6",
+      "value": null,
+      "actions": ["press"],
+      "frame": { "x": 160, "y": 260, "w": 60, "h": 50 },
+      "parent_index": 0,
+      "depth": 1
+    },
+    {
+      "element_index": 10,
+      "element_token": "p1:10",
+      "role": "push button",
+      "label": "6",
+      "value": null,
+      "actions": ["press"],
+      "frame": { "x": 230, "y": 260, "w": 60, "h": 50 },
+      "parent_index": 0,
+      "depth": 1
+    },
+    {
+      "element_index": 11,
+      "element_token": "p1:11",
+      "role": "push button",
+      "label": "Equals",
+      "value": null,
+      "actions": ["press"],
+      "frame": { "x": 230, "y": 320, "w": 60, "h": 50 },
+      "parent_index": 0,
+      "depth": 1
+    },
+    {
+      "element_index": 12,
+      "element_token": "p1:12",
+      "role": "text",
+      "label": "Expression",
+      "value": "",
+      "actions": [],
+      "frame": { "x": 20, "y": 110, "w": 280, "h": 20 },
+      "parent_index": 0,
+      "depth": 1
+    },
+    {
+      "element_index": 13,
+      "element_token": "p1:13",
+      "role": "spin button",
+      "label": "Precision",
+      "value": "2",
+      "actions": ["set_value", "focus"],
+      "frame": { "x": 20, "y": 380, "w": 120, "h": 30 },
+      "parent_index": 0,
+      "depth": 1
+    }
+  ]
+}

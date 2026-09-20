@@ -1,0 +1,41 @@
+{
+  "name": "jev-use",
+  "version": "0.1.0",
+  "description": "Browser use where Jev makes the decisions. Drives your own Chrome over CDP, wired into any agent harness.",
+  "license": "MIT",
+  "type": "commonjs",
+  "bin": {
+    "jev-use": "bin/jev-use.js",
+    "jev-use-mcp": "bin/jev-use-mcp.js"
+  },
+  "scripts": {
+    "postinstall": "node bin/jev-use.js install --auto",
+    "test": "node --test test/*.test.js"
+  },
+  "files": [
+    "bin",
+    "lib",
+    "jev_use/*.py",
+    "skills",
+    "scripts/enable-cdp.sh",
+    "scripts/enable-cdp.ps1",
+    "pyproject.toml",
+    "README.md"
+  ],
+  "keywords": [
+    "mcp",
+    "browser",
+    "browser-use",
+    "cdp",
+    "agent",
+    "chrome"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "os": [
+    "linux",
+    "darwin",
+    "win32"
+  ]
+}
