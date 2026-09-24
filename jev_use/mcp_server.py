@@ -1,17 +1,33 @@
-"""jev-use — browser use with Jev making the decisions, as an MCP server.
+"""jev-use — browser and Android use with Jev making the decisions, as an MCP server.
 
 Any harness (Command Code, Claude Code, Cursor, Codex) can call this. The harness
-brings the reasoning; this server brings the browser and Jev brings the decisions.
+brings the reasoning; this server brings the device and Jev brings the decisions.
 
-Deliberately browser-only and deliberately small — a large tool schema is paid for
-in the model's context on every turn:
+Deliberately small — a large tool schema is paid for in the model's context on
+every turn:
 
     browser_profiles   which Chromium-family browsers are open, and whether CDP works
+    browser_open       launch a profile from a private copy, with a CDP endpoint
     browser_use        drive the page toward a goal; Jev picks each action
-    browser_read       return the page's text so the harness can answer questions
+    browser_extract    ask typed questions about the page, get typed answers
+    browser_read       return the page's text
 
-The desktop / accessibility surface was removed. On GNOME/Wayland it cannot attach
-to an existing browser profile, and that dead end is what made agents burn turns.
+    android_devices    which phones are attached over adb
+    android_use        drive the phone toward a goal; Jev picks each action
+    android_read       return the screen's text
+    android_location   the location Facebook attributes to the signed-in account
+
+Android is four tools rather than five on purpose. It needs no CDP equivalent
+(adb is the channel, and it is always there), and it needs no `extract`: the view
+hierarchy yields a kilobyte or two of text, where a web dashboard yields twenty,
+so handing the harness the text costs almost nothing. `android_location` is the
+one app-shaped tool — it exists because Facebook's own page is the only authority
+on what the app believes about where the account is.
+
+The desktop / accessibility surface was removed. On GNOME/Wayland it cannot
+attach to an existing browser profile, and that dead end is what made agents
+burn turns. Android does not go through it either — see `android.py` for why
+scrcpy's window is the wrong thing to point a window-based driver at.
 
 Wire it up:
 
@@ -40,6 +56,8 @@ from pathlib import Path
 from .profiles import find_profile, local_profiles, start_profile
 from .text_model import TextModel
 
+from . import android as android_engine
+
 SERVER_NAME = "jev-use"
 SERVER_VERSION = "0.3.0"
 PROTOCOL_VERSION = "2025-06-18"
@@ -50,6 +68,11 @@ CACHE_PATH = Path(__file__).resolve().parent.parent / ".jev-browser-cache.json"
 DEFAULT_MAX_STEPS = 8
 DEFAULT_MIN_CONFIDENCE = 0.4
 DEFAULT_SETTLE = 3.0
+# Android settles for less time, for a measured reason — see android.DEFAULT_SETTLE.
+ANDROID_DEFAULT_SETTLE = android_engine.DEFAULT_SETTLE
+#: The location page is a webview with no ready signal, so it is polled. Single
+#: sourced here so the tool schema and the handler cannot drift apart.
+ANDROID_LOCATION_TIMEOUT = android_engine.LOCATION_LOAD_TIMEOUT
 
 
 # -- helpers ----------------------------------------------------------------
@@ -355,6 +378,122 @@ TOOLS: list[dict[str, Any]] = [
             },
         },
     },
+    {
+        "name": "android_devices",
+        "description": (
+            "List the Android devices attached over adb, with their serial and model, "
+            "and whether each is usable. Call this FIRST for any phone task — it also "
+            "reports the two states that explain every failed attempt: 'unauthorized' "
+            "(the phone has not accepted the debugging prompt) and no devices at all. "
+            "Never launches or modifies anything."
+        ),
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "android_use",
+        "description": (
+            "Drive the phone toward a plain-English goal, with Jev choosing each "
+            "action. It reads the live view hierarchy (uiautomator) and taps real "
+            "elements, so Jev selects only from elements this server enumerated and "
+            "cannot invent a tap at a bare coordinate. Returns a step log and timing. "
+            "Set act=false (default) to decide without touching the phone.\n\n"
+            "This changes the screen rather than reporting it — to answer a question "
+            "about what the phone shows, call android_read afterwards.\n\n"
+            "Navigation is cheap here: `go_back` and `go_home` are offered on every "
+            "screen, and backing out of a screen is often the fastest route."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "goal": {"type": "string", "description": "What to accomplish on the phone."},
+                "serial": {
+                    "type": "string",
+                    "description": (
+                        "Which device, from android_devices. Required when more than one "
+                        "is attached; guessing is refused rather than done."
+                    ),
+                },
+                "act": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Actually tap. Default false: decide and validate only.",
+                },
+                "max_steps": {"type": "integer", "default": DEFAULT_MAX_STEPS},
+                "min_confidence": {
+                    "type": "number",
+                    "default": DEFAULT_MIN_CONFIDENCE,
+                    "description": "Stop and report rather than act below this confidence.",
+                },
+                "settle": {
+                    "type": "number",
+                    "default": ANDROID_DEFAULT_SETTLE,
+                    "description": "Upper bound in seconds to wait for the screen to move.",
+                },
+                "use_cache": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": (
+                        "Replay a plan that already succeeded on this same screen and "
+                        "goal, skipping Jev entirely."
+                    ),
+                },
+                "decompose": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": (
+                        "Split a compound goal into ordered subgoals first. Needs a text "
+                        "model; without one the goal is used unchanged."
+                    ),
+                },
+            },
+            "required": ["goal"],
+        },
+    },
+    {
+        "name": "android_read",
+        "description": (
+            "Return the text the phone is currently showing, read from the view "
+            "hierarchy rather than from a screenshot — so it is exact text, not OCR, "
+            "and needs no vision model. Use it to answer a question about what is on "
+            "screen. Password fields contribute their presence but never their value."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "serial": {"type": "string", "description": "Which device, from android_devices."},
+            },
+        },
+    },
+    {
+        "name": "android_location",
+        "description": (
+            "Report the location Facebook currently attributes to the account signed "
+            "in on the phone. It opens Facebook's own 'primary location' page INSIDE "
+            "the app — through the app's internal deep link, so the page renders as an "
+            "app screen rather than in Chrome — and reads it. Use this when the user "
+            "asks which country or city Facebook thinks they are in, or whether an "
+            "account reads as belonging to a particular one.\n\n"
+            "It answers for whichever account is signed in at that moment: switch "
+            "accounts in the app and call it again for the other one. The result says "
+            "whether it found a location page or a sign-in page, so 'not signed in' is "
+            "never confused with 'did not render'.\n\n"
+            "This READS Facebook's own inference — the profile's current city, the "
+            "connection's IP, check-ins and the device location. It reads it, it cannot "
+            "change it, and it is not the same thing as a payout country or a region "
+            "setting."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "serial": {"type": "string", "description": "Which device, from android_devices."},
+                "timeout": {
+                    "type": "number",
+                    "default": ANDROID_LOCATION_TIMEOUT,
+                    "description": "Upper bound in seconds to wait for the page to name a location.",
+                },
+            },
+        },
+    },
 ]
 
 
@@ -547,12 +686,100 @@ def tool_browser_read(args: dict[str, Any]) -> str:
     return f"url={target.url}\n\n{text[:20000]}"
 
 
+# -- android ----------------------------------------------------------------
+
+
+def android_device(args: dict[str, Any]) -> Any:
+    """Resolve the target phone, or raise AdbError with the fix in the message."""
+    return android_engine.pick_device(args.get("serial"))
+
+
+def tool_android_devices(args: dict[str, Any]) -> str:
+    found = android_engine.devices()
+    if not found:
+        return (
+            "no Android device attached.\n"
+            "  * plug it in over USB, or `adb connect <ip>:5555` for wireless debugging\n"
+            "  * on the phone: Settings > Developer options > USB debugging"
+        )
+
+    lines = [f"{len(found)} device(s) attached:"]
+    for device in found:
+        lines.append(("> " if device.usable else "  ") + device.describe())
+    if not any(d.usable for d in found):
+        lines.append("")
+        lines.append(
+            "none usable — unlock the phone and accept the 'Allow USB debugging' prompt"
+        )
+    return "\n".join(lines)
+
+
+def tool_android_use(args: dict[str, Any]) -> str:
+    goal = args["goal"]
+    act = bool(args.get("act", False))
+    try:
+        device = android_device(args)
+        result = android_engine.run(
+            device.serial,
+            goal,
+            JevChooser(),
+            act=act,
+            max_steps=int(args.get("max_steps", DEFAULT_MAX_STEPS)),
+            min_confidence=float(args.get("min_confidence", DEFAULT_MIN_CONFIDENCE)),
+            settle=float(args.get("settle", ANDROID_DEFAULT_SETTLE)),
+            writer=TextModel(),
+            decompose=bool(args.get("decompose", True)),
+            cache=PlanCache(CACHE_PATH) if args.get("use_cache", True) else None,
+        )
+    except android_engine.AdbError as exc:
+        return str(exc)
+
+    return f"device={device.serial}\n" + render(result)
+
+
+def tool_android_read(args: dict[str, Any]) -> str:
+    try:
+        device = android_device(args)
+        text = android_engine.snapshot(device.serial).read()
+    except android_engine.AdbError as exc:
+        return str(exc)
+
+    if not text.strip():
+        return "(the screen returned no visible text)"
+    return f"device={device.serial}\n\n{text[:20000]}"
+
+
+def tool_android_location(args: dict[str, Any]) -> str:
+    try:
+        device = android_device(args)
+        found = android_engine.account_location(
+            device.serial,
+            timeout=float(args.get("timeout", ANDROID_LOCATION_TIMEOUT)),
+        )
+    except android_engine.AdbError as exc:
+        return str(exc)
+
+    lines = [found.describe()]
+    if not found.location:
+        # Nothing was parsed, so hand the caller the page's own words rather than a
+        # bare "(none)" — a sign-in screen and a half-drawn one read very
+        # differently and only the text tells them apart.
+        text = found.text.strip()
+        if text:
+            lines += ["", "shows:", text[:2000]]
+    return "\n".join(lines)
+
+
 HANDLERS = {
     "browser_profiles": tool_browser_profiles,
     "browser_open": tool_browser_open,
     "browser_use": tool_browser_use,
     "browser_extract": tool_browser_extract,
     "browser_read": tool_browser_read,
+    "android_devices": tool_android_devices,
+    "android_use": tool_android_use,
+    "android_read": tool_android_read,
+    "android_location": tool_android_location,
 }
 
 
@@ -623,6 +850,14 @@ def handle(request: dict[str, Any]) -> dict[str, Any] | None:
         except DriverError as exc:
             # A driver refusal is an operational message, not a crash: return it as
             # text so the caller acts on it instead of seeing a stack trace.
+            return {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": {"content": [{"type": "text", "text": str(exc)}], "isError": True},
+            }
+        except android_engine.AdbError as exc:
+            # Same contract for the phone: "no device attached" and "unauthorized"
+            # are instructions, not exceptions.
             return {
                 "jsonrpc": "2.0",
                 "id": request_id,

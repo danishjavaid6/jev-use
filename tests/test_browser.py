@@ -519,8 +519,12 @@ def test_readouts_lead_with_url_and_title() -> None:
 # -- the MCP surface --------------------------------------------------------
 
 
-def test_surface_is_browser_only() -> None:
-    """The desktop tools were removed deliberately; they are not coming back here."""
+def test_surface_is_browser_and_android_only() -> None:
+    """The desktop tools were removed deliberately; they are not coming back here.
+
+    Android is not the desktop surface returning under another name: it goes
+    through adb, so it needs no window binding and no accessibility tree.
+    """
     names = [t["name"] for t in mcp_server.TOOLS]
     assert names == [
         "browser_profiles",
@@ -528,9 +532,14 @@ def test_surface_is_browser_only() -> None:
         "browser_use",
         "browser_extract",
         "browser_read",
+        "android_devices",
+        "android_use",
+        "android_read",
+        "android_location",
     ]
     assert not any("computer_use" in n for n in names)
     assert "list_windows" not in names
+    assert "get_window_state" not in names
 
 
 def test_every_tool_has_a_description_and_schema() -> None:

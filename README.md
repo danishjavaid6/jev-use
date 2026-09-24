@@ -1,18 +1,25 @@
 # jev-use
 
-**Browser use where Jev makes the decisions.**
+**Browser and Android use where Jev makes the decisions.**
 
 ```
 browser_profiles   which Chrome is open, and whether CDP works
+browser_open       launch a profile from a private copy, with a CDP endpoint
 browser_use        drive the page toward a goal; Jev picks each action
+browser_extract    ask typed questions about the page, get typed answers
 browser_read       return the page's text so your agent can answer questions
+
+android_devices    which phones are attached over adb
+android_use        drive the phone toward a goal; Jev picks each action
+android_read       return the screen's text, read from the view hierarchy
+android_location   the location Facebook attributes to the signed-in account
 ```
 
 Any harness — Command Code, Claude Code, Cursor, Codex — can call these over MCP.
-The harness brings the reasoning, this server brings the browser, Jev brings the
+The harness brings the reasoning, this server brings the device, Jev brings the
 decisions. The model never invents an action: it picks one id from a set this server
-built from the live DOM, and the choice is validated against the snapshot it came
-from before anything is dispatched.
+built from the live DOM or the live view hierarchy, and the choice is validated
+against the snapshot it came from before anything is dispatched.
 
 ## Setup
 
@@ -101,6 +108,14 @@ In any chat, either name the tool or use the prompt:
 
 > `/browser-use check my Command Code usage and Cloudflare R2 billing`
 
+> `/android-use turn on Airplane mode`
+
+**The phone needs none of the setup above.** Everything in this section is about
+giving Chrome a CDP port; Android goes through adb, so the requirement is just
+`adb` on PATH, the phone on USB (or `adb connect`), and USB debugging accepted.
+Both skills are installed by the npm package; `adb` itself is a distro package
+(`android-tools-adb` on Debian/Ubuntu, `android-platform-tools` on macOS).
+
 `/browser-use` comes from the **skill** installed at
 `~/.commandcode/skills/browser-use/`, because Command Code surfaces skills as slash
 commands but does not surface MCP prompts. The server also exposes the same guidance
@@ -112,7 +127,11 @@ rather than stopping or silently substituting a different browser.
 
 `browser_use` orbits the page; `browser_read` is what answers a question about what a
 page says. Calling only `browser_use` and expecting a summary is the mistake that made
-a real task look like it "wasn't doing anything".
+a real task look like it "wasn't doing anything". The same split holds on the phone:
+`android_use` changes the screen, `android_read` reports it.
+
+`act=false` is the dry run on both, and it is what makes Android safe to point at a
+real phone — it decides and validates and dispatches nothing at all.
 
 ```bash
 # dry run — decides and validates, clicks nothing
@@ -181,6 +200,46 @@ of the cost is the work itself, not transport.
 * **`semantic_v2` snapshots are 7x slower** (1537 ms vs 210 ms). Use the default.
 * **Tighter AX bounds are slower**, not faster: `max_elements=60` took 1309 ms and
   returned 1 element against 736 ms and 29 elements for the default.
+
+### Android speed
+
+Measured on a Huawei RNE-L21 over USB. One snapshot used to cost **2912 ms**; it is
+now **2122 ms**, and where the rest went is worth recording because two of the three
+fixes were pure waste:
+
+| primitive | cost |
+|---|---|
+| `uiautomator dump` | **2037 ms** — the real work |
+| `wm size` | **800 ms** — for a value that never changes |
+| `dumpsys window` | 52 ms |
+| `exec-out cat` | 39 ms |
+| adb floor (`shell true`) | 21 ms |
+
+* **Cache `wm size`, keyed on rotation.** It was 27% of every snapshot, re-asked to
+  learn a constant. The rotation comes free from the dump we already have, so a
+  rotated device cannot be handed stale dimensions.
+* **Never snapshot inside the settle poll.** The poll only asks "has the foreground
+  app changed?" and answered it with a full hierarchy dump — ~2.9 s per attempt,
+  most of a step's budget spent to read one string. It polls a ~50 ms signal now.
+* **Android settles for 1.5 s, not 3.** Most Android actions navigate *within* an
+  app, so the foreground never changes and the poll cannot fire; a long settle is
+  then dead time. What actually settles the screen is the dump itself, which blocks
+  on UI idle — measured at **3.0-3.4 s in a transition against 2.1 s still**.
+
+Net, on a real one-action run: **17.5 s → 9.9 s**, and the per-decision floor is now
+~3.2-4.1 s, of which 2.1 s is the dump.
+
+**The floor is `uiautomator`, and it is per-dump, not per-startup.** Two dumps inside
+one `adb shell` took 4063 ms and four took 8084 ms, so each one pays full price — the
+cost is the UI-idle sync, not process startup. A persistent on-device uiautomator
+would therefore buy nothing, and `--compressed` saves 3%. Going meaningfully below
+~2 s per snapshot needs a different mechanism entirely (a companion accessibility
+service, or capture-plus-vision), not more tuning.
+
+`dumpsys activity top` is 77 ms and *does* contain a view hierarchy, and it is
+deliberately unused: it dumps one activity's raw View tree, so it sees nothing inside
+a WebView, Compose or Flutter surface and would report an empty container where the
+real UI is.
 
 ## Getting answers out of a page
 
@@ -328,28 +387,92 @@ answers underneath a tuned confidence threshold.
 * **A driver refusal is guidance, not a stack trace.** `DriverError` is returned as
   readable text so the caller can act on it.
 
+## Android
+
+Same loop, different device. There is no phone equivalent of the Chrome copy
+dance: adb is the automation channel and it is already there, so the whole setup
+is "plug it in and accept the debugging prompt".
+
+```
+android_devices    which phones are attached, and whether each is usable
+android_use        drive toward a goal; Jev picks each action
+android_read       the screen's text, read from the view hierarchy
+android_location   what location Facebook attributes to the signed-in account
+```
+
+**Why this talks to adb instead of to scrcpy's window.** scrcpy is a *viewer* — it
+renders the phone into a single OpenGL surface, so anything reading it through
+accessibility or the window tree sees one opaque element. That is precisely the
+GNOME/Wayland dead end that made the desktop surface unusable here, and pointing
+a window-based driver at scrcpy reproduces it exactly. The channel *under* scrcpy
+is adb, so that is what this speaks. Two things fall out of it:
+
+* **scrcpy is not required.** It works with the phone on USB and adb running,
+  scrcpy open or not — and with it open you can *watch* the agent work.
+* **Coordinates need no scaling.** `uiautomator` reports bounds in the device's
+  own space and `input tap` consumes the same space, so a tap is arithmetic
+  rather than a mapping problem.
+
+The snapshot is `uiautomator dump` — the live view hierarchy with text, content
+descriptions, classes and bounds. That is what makes the model's choice a
+*closed set* rather than a coordinate guess.
+
+**Two things measured on real hardware**, both of which changed the code:
+
+* **`/sdcard` is a trap.** On EMUI, `uiautomator dump /sdcard/x.xml` reports
+  *"UI hierchary dumped to: /sdcard/x.xml"* and the file is not there. A naive
+  implementation reads that as a blank screen. The dump goes to
+  `/data/local/tmp` instead, which always exists and needs no permissions.
+* **Ambiguous options poison the confidence.** A lock screen offered two stacked
+  cards in the same region, both rendered as `framelayout - middle-centre`. Jev
+  answered **0.37** — under the threshold — and the run refused to act. The model
+  was not unsure about the goal; it could not tell which of two identical options
+  it was choosing between. Descriptions now escalate from position to exact tap
+  point, so every option is unique.
+
+**Reading a page that only exists inside an app.** `android_location` reports the
+location Facebook attributes to the signed-in account, and getting there needed the
+one route that works. An `https://facebook.com/...` intent is *not* it — the app
+publishes no App Link for it, so Android hands the URL to Chrome; naming the package
+is refused (`unable to resolve Intent`), and starting the webview activity directly
+is blocked by `com.facebook.permission.prod.FB_APP_COMMUNICATION`. The app's own
+`fb://facewebmodal/f?href=<encoded url>` deep link opens its internal webview, which
+is what makes the page readable as an app screen rather than a browser tab. The URL
+is cache-busted on every call, because the webview keeps the last page and a second
+check after switching accounts would otherwise be served the first account's answer.
+
+**Limits.** Typing is ASCII only: `adb input text` cannot deliver non-ASCII, and a
+non-ASCII value is *refused* rather than mangled. A locked phone has no useful view
+hierarchy, and there is no unlock support. Some UI is genuinely not tappable per
+`uiautomator` — the text is visible to the model, but it is not offered as a target.
+
 ## Layout
 
 ```
-jev_use/browser.py     the engine: discovery, snapshot, read, Jev loop
+jev_use/browser.py     the browser engine: discovery, snapshot, read, Jev loop
+jev_use/android.py     the Android engine: adb, view hierarchy, taps
+jev_use/host.py        the one file that knows the platform
 jev_use/choosers.py    JevChooser (live) and MockChooser (offline)
 jev_use/driver.py      cua-driver MCP stdio client + the env contract
-jev_use/mcp_server.py  the three-tool MCP surface
+jev_use/mcp_server.py  the MCP surface, browser and Android
 jev_use/profiles.py    profile registry, copy-and-launch, and the CLI
 jev_use/text_model.py  the planner and writer Jev structurally cannot be
+bin/, lib/             the npm installer
 scripts/enable-cdp.sh  thin wrapper over profiles.py (--list / --open NAME)
 skills/browser-use/    the same guidance as an agent skill
-tests/                 92 tests
+skills/android-use/    ditto, for the phone
+tests/                 274 python tests, test/ 29 node tests
 ```
 
 `jev_use/candidates.py`, `loop.py` and `cli.py` are the retired desktop surface. They
 are unregistered from MCP and kept on disk only so the work is not lost; nothing in the
-browser path imports them.
+browser or Android path imports them.
 
 ## Test
 
 ```bash
-python -m pytest -q
+python -m pytest -q      # the engines
+npm test                 # the installer
 ```
 
 ## Limits
