@@ -55,6 +55,23 @@ page says. Two ways to actually get the content:
 * **`browser_read`** when you need the raw text — an unfamiliar page, a commit
   message, deciding what to ask next.
 
+**Many URLs? Read them together, not one at a time.** If the task spans several pages
+(a list of sites, a batch of tickets, the same page for N accounts), do **not** call
+`browser_read` in a loop — that is N tool calls and N turns. Use:
+
+```
+browser_read_many(urls=["https://a.example/contact",
+                        "https://b.example/contact"],
+                  concurrency=3)
+```
+
+It opens one tab per URL, reads them in parallel, and returns the text of each in the
+order you asked, labelled with its URL. A page that fails is reported in its own
+section rather than failing the whole call. Prefer it whenever you already know the
+URLs — and if you only need specific fields, go straight to the page with
+`browser_use(url=...)` then `browser_extract`, rather than navigating through the
+site with clicks.
+
 **4. Report precisely.** Quote the values you saw or extracted: numbers, names, dates.
 If a page needed a login and the session had expired, say so plainly rather than
 guessing at the contents.
@@ -80,7 +97,8 @@ Cloudflare R2 billing — could not reach: the page redirected to a product
   login wall appears, say so.
 * **Typing.** `type_text` needs a configured text model (`JEV_USE_TEXT_MODEL`); without
   one, only clicking, scrolling and reading are available.
-* **One tab at a time.** Sites are visited sequentially, not in parallel.
+* **`browser_use` drives one page at a time.** Stepping through a site is sequential;
+  only `browser_read_many` fans out across tabs (up to 8).
 * **A "driver did not answer" timeout.** The page raised a JavaScript dialog
   (`alert`/`confirm`/`beforeunload`) that blocked the call. Just retry — the server
   kills the stuck driver and starts a fresh one. Do **not** restart Chrome or reopen

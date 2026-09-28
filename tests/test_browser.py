@@ -763,6 +763,107 @@ def test_navigate_and_settle_baselines_on_the_live_page(
     assert order == ["signature", "js"], "read the live URL before navigating"
 
 
+# -- reading many pages -----------------------------------------------------
+
+
+class _FakeReadDriver:
+    """A driver whose `page` call always answers with one fixed page."""
+
+    def __init__(self, text: str = "Hello page") -> None:
+        self.text = text
+        self.started = False
+        self.closed = False
+
+    def start(self) -> None:
+        self.started = True
+
+    def close(self) -> None:
+        self.closed = True
+
+    def call(self, tool, args=None):
+        outer = "cdp.runtime.evaluate.user_gesture: " + json.dumps(
+            json.dumps({"url": "u", "state": "complete", "nodes": 5, "text": self.text})
+        )
+
+        class R:
+            text = outer
+
+        return R()
+
+
+def test_read_many_reads_every_url_and_closes_its_tabs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    urls = ["https://a.test", "https://b.test", "https://c.test"]
+    opened: list[str] = []
+    closed: list[str] = []
+    monkeypatch.setattr(
+        browser, "open_tab",
+        lambda port, url: opened.append(url) or {"id": f"t{len(opened)}", "url": url},
+    )
+    monkeypatch.setattr(browser, "close_tab", lambda port, tab_id: closed.append(tab_id))
+
+    results = browser.read_many(
+        browser.Target(port=9222, pid=1, window_id=2), urls,
+        concurrency=3, wait=False, new_driver=lambda: _FakeReadDriver("Page text"),
+    )
+
+    assert [u for u, _ in results] == urls, "order is preserved"
+    assert all("Page text" in t for _, t in results)
+    assert opened == urls
+    assert len(closed) == 3, "every tab we opened is closed again"
+
+
+def test_read_many_reports_one_bad_page_without_sinking_the_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def open_tab(port, url):
+        return None if url.endswith("bad") else {"id": "t1", "url": url}
+
+    monkeypatch.setattr(browser, "open_tab", open_tab)
+    monkeypatch.setattr(browser, "close_tab", lambda *a: None)
+
+    results = browser.read_many(
+        browser.Target(port=9222, pid=1, window_id=2),
+        ["https://ok.test", "https://bad"],
+        concurrency=2, wait=False, new_driver=lambda: _FakeReadDriver("fine"),
+    )
+    assert results[0][1] == "fine"
+    assert results[1][1].startswith("[error]")
+
+
+def test_open_tab_uses_put(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Chrome refuses the GET form of /json/new with 405."""
+    seen: dict[str, str] = {}
+
+    def fake_urlopen(request, timeout=None):
+        seen["method"] = request.method
+        seen["url"] = request.full_url
+
+        class R:
+            def read(self):
+                return b'{"id":"t","url":"https://x.test"}'
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_a):
+                return False
+
+        return R()
+
+    monkeypatch.setattr(browser.urllib.request, "urlopen", fake_urlopen)
+    tab = browser.open_tab(9222, "https://x.test/a b")
+    assert seen["method"] == "PUT"
+    assert tab["id"] == "t"
+    assert "a%20b" in seen["url"], "the URL is quoted"
+
+
+def test_read_many_concurrency_default_is_single_sourced() -> None:
+    schema = {t["name"]: t for t in mcp_server.TOOLS}["browser_read_many"]["inputSchema"]
+    assert schema["properties"]["concurrency"]["default"] == mcp_server.DEFAULT_READ_CONCURRENCY
+
+
 def test_readouts_lead_with_url_and_title() -> None:
     readouts = make_observation().readouts()
     assert readouts[0] == "https://example.test/page"
@@ -785,6 +886,7 @@ def test_surface_is_browser_and_android_only() -> None:
         "browser_use",
         "browser_extract",
         "browser_read",
+        "browser_read_many",
         "android_devices",
         "android_use",
         "android_read",

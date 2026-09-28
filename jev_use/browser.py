@@ -22,13 +22,15 @@ Free text is absent by design: Jev cannot generate strings.
 
 from __future__ import annotations
 
+import concurrent.futures
 import hashlib
 import json
 import re
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -303,6 +305,68 @@ def discover_port() -> int | None:
         if cdp_alive(port):
             return port
     return None
+
+
+# -- tabs, straight over CDP ------------------------------------------------
+#
+# Chrome's DevTools HTTP endpoint speaks enough for tab management, and it is the
+# only route we have: the driver's `page` tool has no "new tab" action, and its
+# `browser_open` launches a whole profile rather than a tab.
+
+
+def _cdp(port: int, path: str, *, method: str = "GET", timeout: float = 8.0) -> Any:
+    """One call to Chrome's DevTools HTTP endpoint, parsed when it returns JSON.
+
+    `/json/close` answers with plain text, so a body that is not JSON is `None`
+    rather than an error — the call itself succeeded.
+    """
+    request = urllib.request.Request(f"http://127.0.0.1:{port}{path}", method=method)
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        body = response.read().decode("utf-8", "replace")
+    try:
+        return json.loads(body)
+    except json.JSONDecodeError:
+        return None
+
+
+def list_tabs(port: int) -> list[dict[str, Any]]:
+    """Every page tab on this port, each with its target `id` and current URL."""
+    try:
+        tabs = _cdp(port, "/json/list")
+    except (urllib.error.URLError, OSError, ValueError):
+        return []
+    return [t for t in (tabs or []) if isinstance(t, dict) and t.get("type") == "page"]
+
+
+def open_tab(port: int, url: str) -> dict[str, Any] | None:
+    """Open a tab at `url`, returning its target descriptor, or None.
+
+    `PUT`, not `GET`: measured on Chrome 140, the GET form is refused with
+    405 "Using unsafe HTTP verb GET to invoke /json/new".
+    """
+    try:
+        return _cdp(port, f"/json/new?{urllib.parse.quote(url, safe='')}", method="PUT")
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError, ValueError):
+        return None
+
+
+def close_tab(port: int, tab_id: str) -> None:
+    """Close a tab we opened. Never raises: cleanup must not mask the result."""
+    try:
+        _cdp(port, f"/json/close/{tab_id}")
+    except Exception:
+        pass
+
+
+def _tab_hint(tab: dict[str, Any] | None, url: str) -> str:
+    """The substring the driver will pin this worker to.
+
+    `target_url_contains` is the only way to say *which* tab a CDP call reaches, so
+    it must match exactly one tab. The tab's own URL is preferred (it survives a
+    redirect), falling back to the URL we asked for while it is still blank.
+    """
+    current = (tab or {}).get("url") or ""
+    return current if current and current != "about:blank" else url
 
 
 # -- target -----------------------------------------------------------------
@@ -882,6 +946,77 @@ def navigate_and_settle(driver: Driver, target: Target, url: str, settle: float)
     before = _page_signature(driver, target)
     _js(driver, target, navigate_js(url))
     _wait_for_settle(driver, target, before, settle)
+
+
+# -- many pages at once -----------------------------------------------------
+
+
+def read_many(
+    base: Target,
+    urls: list[str],
+    *,
+    concurrency: int = 3,
+    wait: bool = True,
+    timeout: float = READ_TIMEOUT,
+    new_driver: Any = None,
+) -> list[tuple[str, str]]:
+    """Read several pages at once, one tab each, returning `(url, text)` in order.
+
+    Why this exists. A task over N sites used to be N tool calls — each its own model
+    turn, each blocking the next — so the wall clock was N x (page load + decision +
+    model turn). This is ONE call that opens a tab per URL and reads them together,
+    so the page loads overlap and the harness pays one turn instead of N.
+
+    Each worker gets its **own** driver process: the client serialises calls through
+    one driver (a lock around every request), so sharing it would quietly put the
+    workers back in a single queue and buy nothing. Each worker also owns its tab and
+    pins to it by URL — `target_url_contains` is the only way to say which tab a CDP
+    call reaches.
+
+    A page that fails is reported in its own slot, so one bad site cannot sink the
+    batch. Tabs we opened are closed again.
+    """
+    if not urls:
+        return []
+
+    workers = max(1, min(int(concurrency), len(urls)))
+    results: list[tuple[str, str] | None] = [None] * len(urls)
+
+    def worker(index: int, url: str) -> None:
+        tab: dict[str, Any] | None = None
+        driver = None
+        try:
+            tab = open_tab(base.port, url)
+            if tab is None:
+                results[index] = (url, "[error] could not open a tab")
+                return
+            target = replace(base, url_hint=_tab_hint(tab, url))
+            driver = new_driver() if new_driver is not None else Driver()
+            driver.start()
+            results[index] = (url, read(driver, target, wait=wait, timeout=timeout))
+        except Exception as exc:  # noqa: BLE001 - one page must not sink the batch
+            results[index] = (url, f"[error] {exc}")
+        finally:
+            if driver is not None:
+                try:
+                    driver.close()
+                except Exception:
+                    pass
+            if tab is not None and tab.get("id"):
+                close_tab(base.port, tab["id"])
+
+    if workers == 1:
+        for index, url in enumerate(urls):
+            worker(index, url)
+    else:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+            for index, url in enumerate(urls):
+                pool.submit(worker, index, url)
+
+    return [
+        results[i] if results[i] is not None else (urls[i], "[error] no result")
+        for i in range(len(urls))
+    ]
 
 
 # -- the loop ---------------------------------------------------------------

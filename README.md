@@ -8,6 +8,7 @@ browser_open       launch a profile from a private copy, with a CDP endpoint
 browser_use        drive the page toward a goal; Jev picks each action
 browser_extract    ask typed questions about the page, get typed answers
 browser_read       return the page's text so your agent can answer questions
+browser_read_many  read several URLs at once, one tab each, in parallel
 
 android_devices    which phones are attached over adb
 android_use        drive the phone toward a goal; Jev picks each action
@@ -212,6 +213,11 @@ of the cost is the work itself, not transport.
 * **Page-scoped candidates.** A DOM snapshot returns page elements, not browser chrome.
   On `example.com` the accessibility path offered 29 targets, **28 of them toolbar
   buttons**; the DOM offers the page.
+* **Reading N pages is one call, not N.** `browser_read_many` opens a tab per URL and
+  reads them together, so the page loads overlap and the harness pays one turn instead
+  of one per page. Measured: three pages in **2.6 s** (tabs opened and closed around
+  it). `browser_use` still drives one page at a time — stepping through a site is a
+  sequence of decisions, not a fan-out.
 
 ### Things that look like optimisations and are not
 

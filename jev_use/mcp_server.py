@@ -49,7 +49,7 @@ from typing import Any
 
 from .browser import DEFAULT_PROFILE, attach, read as browser_read, run as browser_run
 from .browser import running_profiles, cdp_alive
-from .browser import navigate_and_settle
+from .browser import navigate_and_settle, read_many as browser_read_many
 from .choosers import JevChooser
 from .cache import PlanCache
 from .driver import Driver, DriverError
@@ -70,6 +70,10 @@ CACHE_PATH = Path(__file__).resolve().parent.parent / ".jev-browser-cache.json"
 DEFAULT_MAX_STEPS = 8
 DEFAULT_MIN_CONFIDENCE = 0.4
 DEFAULT_SETTLE = 3.0
+#: Tabs browser_read_many reads at once. Deliberately small: each worker is its own
+#: driver process and its own browser tab, Chrome throttles background tabs, and the
+#: returns flatten fast past a handful.
+DEFAULT_READ_CONCURRENCY = 3
 # Android settles for less time, for a measured reason — see android.DEFAULT_SETTLE.
 ANDROID_DEFAULT_SETTLE = android_engine.DEFAULT_SETTLE
 #: The location page is a webview with no ready signal, so it is polled. Single
@@ -517,6 +521,38 @@ TOOLS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "browser_read_many",
+        "description": (
+            "Read SEVERAL pages at once — one tab each, in parallel — and return the "
+            "text of each. Use this instead of calling browser_read N times when a "
+            "task spans many URLs (a list of sites, a batch of tickets): it is a "
+            "single tool call, it overlaps the page loads, and you pay one turn "
+            "instead of N. Results come back in the order you asked, each labelled "
+            "with its URL; a page that fails is reported in place rather than "
+            "failing the batch. A maximum of 8 URLs is opened at once."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "urls": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "The pages to read, in the order you want them back.",
+                },
+                "concurrency": {
+                    "type": "integer",
+                    "default": DEFAULT_READ_CONCURRENCY,
+                    "description": "How many tabs to read at once (1-8).",
+                },
+                "profile": {
+                    "type": "string",
+                    "description": "Which browser profile to read, as in browser_use.",
+                },
+            },
+            "required": ["urls"],
+        },
+    },
+    {
         "name": "android_devices",
         "description": (
             "List the Android devices attached over adb, with their serial and model, "
@@ -807,6 +843,23 @@ def tool_browser_read(args: dict[str, Any]) -> str:
     return f"url={target.url}\n\n{text[:20000]}"
 
 
+def tool_browser_read_many(args: dict[str, Any]) -> str:
+    urls = [u.strip() for u in (args.get("urls") or []) if isinstance(u, str) and u.strip()]
+    if not urls:
+        return "no urls given"
+    concurrency = max(1, min(int(args.get("concurrency", DEFAULT_READ_CONCURRENCY)), 8))
+    try:
+        # The shared session supplies the port/window; the batch spawns its own
+        # driver per worker, because one driver serialises its calls.
+        _driver, target = _browser_session(args.get("profile"))
+        results = browser_read_many(target, urls, concurrency=concurrency)
+    except DriverError as exc:
+        return str(exc)
+    blocks = [f"url={url}\n{text[:20000]}" for url, text in results]
+    header = f"{len(results)} page(s), {concurrency} at a time"
+    return header + "\n\n" + "\n\n---\n\n".join(blocks)
+
+
 # -- android ----------------------------------------------------------------
 
 
@@ -897,6 +950,7 @@ HANDLERS = {
     "browser_use": tool_browser_use,
     "browser_extract": tool_browser_extract,
     "browser_read": tool_browser_read,
+    "browser_read_many": tool_browser_read_many,
     "android_devices": tool_android_devices,
     "android_use": tool_android_use,
     "android_read": tool_android_read,
