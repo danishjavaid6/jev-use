@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 import json
 import time
 
@@ -797,9 +798,10 @@ def test_read_many_reads_every_url_and_closes_its_tabs(
     urls = ["https://a.test", "https://b.test", "https://c.test"]
     opened: list[str] = []
     closed: list[str] = []
+    ids = itertools.count(1)
     monkeypatch.setattr(
         browser, "open_tab",
-        lambda port, url: opened.append(url) or {"id": f"t{len(opened)}", "url": url},
+        lambda port, url: opened.append(url) or {"id": f"t{next(ids)}", "url": url},
     )
     monkeypatch.setattr(browser, "close_tab", lambda port, tab_id: closed.append(tab_id))
 
@@ -808,9 +810,9 @@ def test_read_many_reads_every_url_and_closes_its_tabs(
         concurrency=3, wait=False, new_driver=lambda: _FakeReadDriver("Page text"),
     )
 
-    assert [u for u, _ in results] == urls, "order is preserved"
+    assert [u for u, _ in results] == urls, "results are returned in the order asked"
     assert all("Page text" in t for _, t in results)
-    assert opened == urls
+    assert sorted(opened) == sorted(urls), "every url got a tab (opened concurrently)"
     assert len(closed) == 3, "every tab we opened is closed again"
 
 
