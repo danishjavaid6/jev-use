@@ -1,9 +1,9 @@
 ---
-name: android-use
+name: mobile-use
 description: Drive the user's own Android phone to do a task and report what the screens say — apps, settings, messages, anything reachable by tapping. Use when the user asks you to do something on their phone, or to check what it shows.
 ---
 
-# android-use
+# mobile-use
 
 Use the `jev-use` MCP server. It drives the user's **own** phone over adb, and Jev
 makes every on-screen decision.

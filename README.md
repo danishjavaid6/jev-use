@@ -33,9 +33,12 @@ cp .env.example .env          # then set TYPESAFE_API_KEY
 
 cmd mcp add --scope user jev-use -- "$PWD/.venv/bin/python" -m jev_use.mcp_server
 
-# the /browser-use entry point (Command Code surfaces skills, not MCP prompts)
-mkdir -p ~/.commandcode/skills/browser-use
-cp skills/browser-use/SKILL.md ~/.commandcode/skills/browser-use/SKILL.md
+# the /browser-use and /mobile-use entry points (Command Code surfaces skills, not
+# MCP prompts). `jev-use install` does this for every harness it finds.
+for skill in browser-use mobile-use; do
+  mkdir -p ~/.commandcode/skills/$skill
+  cp skills/$skill/SKILL.md ~/.commandcode/skills/$skill/SKILL.md
+done
 ```
 
 **Windows (PowerShell)**
@@ -46,8 +49,10 @@ Copy-Item .env.example .env    # then set TYPESAFE_API_KEY
 
 cmd mcp add --scope user jev-use -- "$PWD\.venv\Scripts\python.exe" -m jev_use.mcp_server
 
-New-Item -ItemType Directory -Force "$env:USERPROFILE\.commandcode\skills\browser-use" | Out-Null
-Copy-Item skills\browser-use\SKILL.md "$env:USERPROFILE\.commandcode\skills\browser-use\SKILL.md"
+foreach ($skill in "browser-use","mobile-use") {
+  New-Item -ItemType Directory -Force "$env:USERPROFILE\.commandcode\skills\$skill" | Out-Null
+  Copy-Item "skills\$skill\SKILL.md" "$env:USERPROFILE\.commandcode\skills\$skill\SKILL.md"
+}
 ```
 
 **The driver, once per machine.** It is a separate Rust binary and it has a
@@ -108,7 +113,7 @@ In any chat, either name the tool or use the prompt:
 
 > `/browser-use check my Command Code usage and Cloudflare R2 billing`
 
-> `/android-use turn on Airplane mode`
+> `/mobile-use turn on Airplane mode`
 
 **The phone needs none of the setup above.** Everything in this section is about
 giving Chrome a CDP port; Android goes through adb, so the requirement is just
@@ -116,10 +121,12 @@ giving Chrome a CDP port; Android goes through adb, so the requirement is just
 Both skills are installed by the npm package; `adb` itself is a distro package
 (`android-tools-adb` on Debian/Ubuntu, `android-platform-tools` on macOS).
 
-`/browser-use` comes from the **skill** installed at
-`~/.commandcode/skills/browser-use/`, because Command Code surfaces skills as slash
-commands but does not surface MCP prompts. The server also exposes the same guidance
-as the MCP prompt `browser-use` for harnesses that do support prompts.
+`/browser-use` and `/mobile-use` come from the **skills** installed at
+`~/.commandcode/skills/{browser-use,mobile-use}/`, because Command Code surfaces skills
+as slash commands but does not surface MCP prompts. The server also exposes the same
+guidance as the MCP prompts `browser-use` and `mobile-use` for harnesses that do support
+prompts. `jev-use install` installs both skills into every harness skills directory it
+finds — Command Code, Claude Code, Codex, and the shared `~/.agents/skills`.
 
 Either way the guidance is identical: discover → open if needed → drive → **read** →
 report, with an explicit instruction to call `browser_open` when nothing is drivable
@@ -518,9 +525,9 @@ jev_use/profiles.py    profile registry, copy-and-launch, and the CLI
 jev_use/text_model.py  the planner and writer Jev structurally cannot be
 bin/, lib/             the npm installer
 scripts/enable-cdp.sh  thin wrapper over profiles.py (--list / --open NAME)
-skills/browser-use/    the same guidance as an agent skill
-skills/android-use/    ditto, for the phone
-tests/                 274 python tests, test/ 29 node tests
+skills/browser-use/    the same guidance as an agent skill (/browser-use)
+skills/mobile-use/     ditto, for the phone (/mobile-use)
+tests/                 python tests, test/ node tests
 ```
 
 `jev_use/candidates.py`, `loop.py` and `cli.py` are the retired desktop surface. They

@@ -20,7 +20,7 @@ const USAGE = `jev-use — browser use where Jev makes the decisions
 Usage
   jev-use install [--key=<key>] [--auto] [--force]
         Provision the runtime, install cua-driver, and register the MCP server
-        and the /browser-use skill with every harness it finds.
+        and the /browser-use and /mobile-use skills with every harness it finds.
 
   jev-use doctor
         Report what is and is not working, and why.

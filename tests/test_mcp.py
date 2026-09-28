@@ -78,12 +78,23 @@ def test_unexpected_exceptions_become_error_results(monkeypatch: pytest.MonkeyPa
 # -- prompts ----------------------------------------------------------------
 
 
-def test_prompts_list_exposes_browser_use() -> None:
-    """The slash-command entry point: the user types /browser-use in any harness."""
+def test_prompts_list_exposes_both_entry_points() -> None:
+    """The slash-command entry points: /browser-use and /mobile-use in any harness."""
     response = mcp_server.handle({"jsonrpc": "2.0", "id": 7, "method": "prompts/list"})
     names = [p["name"] for p in response["result"]["prompts"]]
-    assert names == ["browser-use"]
-    assert response["result"]["prompts"][0]["arguments"][0]["required"] is True
+    assert names == ["browser-use", "mobile-use"]
+    assert all(p["arguments"][0]["required"] is True for p in response["result"]["prompts"])
+
+
+def test_prompts_get_exposes_mobile_use() -> None:
+    response = mcp_server.handle(
+        {"jsonrpc": "2.0", "id": 12, "method": "prompts/get",
+         "params": {"name": "mobile-use", "arguments": {"task": "turn on Airplane mode"}}}
+    )
+    text = response["result"]["messages"][0]["content"]["text"]
+    assert "turn on Airplane mode" in text
+    assert "android_devices" in text, "must send the model to device discovery first"
+    assert "android_read" in text, "must name the step that actually answers"
 
 
 def test_prompts_get_returns_instructions_containing_the_task() -> None:

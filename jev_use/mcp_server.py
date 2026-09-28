@@ -241,6 +241,50 @@ Follow this order and do not skip steps:
 Report per section: what you opened, what it said, and anything you could not reach.
 """
 
+MOBILE_PROMPT_NAME = "mobile-use"
+
+MOBILE_PROMPT_TEMPLATE = """Use the jev-use phone tools to do this task on the user's own Android phone:
+
+    {task}
+
+Follow this order and do not skip steps:
+
+1. Call android_devices FIRST. It answers the two things that go wrong silently:
+
+   * Nothing listed — the phone is not connected. USB, or `adb connect <ip>:5555` for
+     wireless debugging; on the phone, Settings > Developer options > USB debugging.
+   * `[unauthorized]` — the phone has not accepted the debugging prompt. Unlock it and
+     accept the dialog; nothing works until it is accepted.
+
+   If several devices are attached, pass `serial` explicitly. The server refuses to
+   guess, and it will not substitute a different phone.
+
+2. android_use(goal=..., act=true) to get there. Jev picks every tap, so describe the
+   destination, not the taps. Leave `decompose` on unless the goal is already one step.
+   `act=false` (the default) decides and validates WITHOUT touching the phone — the
+   right first move for anything destructive. `go_back` and `go_home` are offered on
+   every screen; backing out of a screen is often the fastest route, not a failure.
+
+3. android_use CHANGES the screen; it does not report what it says. Use **android_read**
+   to answer a question about what the phone shows. It reads the view hierarchy, so the
+   text is exact rather than OCR — no vision model involved.
+
+4. Answer from what android_read returned, and quote the specific values you saw
+   (names, numbers, times, toggle states). If a screen needed a login and the session
+   had expired, say so plainly rather than guessing at the contents.
+
+android_location reports the location Facebook attributes to the signed-in account,
+read from Facebook's own page inside the app. Read `state` before the value:
+`location` (quote it), `login` (signed out — say so), `unknown` (not rendered — retry).
+
+Report per section: what you opened, what it said, and anything you could not reach.
+"""
+
+PROMPT_TEMPLATES: dict[str, str] = {
+    PROMPT_NAME: PROMPT_TEMPLATE,
+    MOBILE_PROMPT_NAME: MOBILE_PROMPT_TEMPLATE,
+}
+
 PROMPTS: list[dict[str, Any]] = [
     {
         "name": PROMPT_NAME,
@@ -255,18 +299,34 @@ PROMPTS: list[dict[str, Any]] = [
                 "required": True,
             }
         ],
-    }
+    },
+    {
+        "name": MOBILE_PROMPT_NAME,
+        "description": (
+            "Do a task on the user's own Android phone (apps, settings, messages) and "
+            "report what the screens say."
+        ),
+        "arguments": [
+            {
+                "name": "task",
+                "description": "The task in plain English.",
+                "required": True,
+            }
+        ],
+    },
 ]
 
 
 def prompt_messages(name: str, arguments: dict[str, Any]) -> dict[str, Any] | None:
-    if name != PROMPT_NAME:
+    template = PROMPT_TEMPLATES.get(name)
+    if template is None:
         return None
     task = (arguments or {}).get("task", "").strip() or "(no task given)"
+    kind = "Phone" if name == MOBILE_PROMPT_NAME else "Browser"
     return {
-        "description": f"Browser task: {task[:80]}",
+        "description": f"{kind} task: {task[:80]}",
         "messages": [
-            {"role": "user", "content": {"type": "text", "text": PROMPT_TEMPLATE.format(task=task)}}
+            {"role": "user", "content": {"type": "text", "text": template.format(task=task)}}
         ],
     }
 
