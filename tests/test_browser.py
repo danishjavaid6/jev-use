@@ -28,6 +28,14 @@ def test_click_js_uses_an_integer_ref_never_page_text() -> None:
     assert "e.click()" in js
 
 
+def test_navigate_js_clears_beforeunload_first() -> None:
+    """A `beforeunload` prompt blocks the CDP call and hangs the tool; the handler is
+    cleared just before we navigate."""
+    js = browser.navigate_js("https://x.test/a")
+    assert "onbeforeunload = null" in js
+    assert "https://x.test/a" in js
+
+
 def test_click_js_refuses_a_non_integer_ref() -> None:
     """Fail closed. A ref is always one of our own integers; anything else is a bug,
     and interpolating it into the script would be an injection."""

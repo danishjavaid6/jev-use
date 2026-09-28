@@ -8,15 +8,26 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import subprocess
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
 from . import host
 
 PROTOCOL_VERSION = "2025-06-18"
-CALL_TIMEOUT_SECONDS = 60.0
+
+#: How long one driver call may take before it is abandoned.
+#:
+#: A wedged call must not hang the whole MCP tool until the *harness* gives up —
+#: which is what happens when a page raises a JS dialog (`alert`/`confirm`/
+#: `beforeunload`), because `Runtime.evaluate` then blocks until the dialog is
+#: answered and nothing here ever answers it. Observed in a real run: the tool call
+#: hung, the harness timed out, and the agent burned steps restarting Chrome.
+#: Every single call is sub-second in practice, so this is ~50x margin.
+CALL_TIMEOUT_SECONDS = float(os.environ.get("JEV_USE_CALL_TIMEOUT", "30"))
 
 # The Wayland path (AT-SPI + the WinRects GNOME Shell helper) is opt-in. Without
 # this the driver uses X11 only and reports zero windows on a native-Wayland
@@ -89,6 +100,9 @@ class Driver:
         self._next_id = 0
         self._lock = threading.Lock()
         self.stderr_tail: list[str] = []
+        #: Lines the stdout reader thread has produced. A queue rather than a bare
+        #: `readline()` so a call can be abandoned on a deadline.
+        self._lines: queue.Queue[str | None] = queue.Queue()
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -114,7 +128,9 @@ class Driver:
             bufsize=1,
             env=env,
         )
+        self._lines = queue.Queue()
         threading.Thread(target=self._drain_stderr, daemon=True).start()
+        threading.Thread(target=self._read_stdout, daemon=True).start()
         self._request(
             "initialize",
             {
@@ -157,13 +173,32 @@ class Driver:
             self.stderr_tail.append(line.rstrip())
             del self.stderr_tail[:-40]
 
+    def _read_stdout(self) -> None:
+        """Feed reply lines onto the queue, and a `None` sentinel on EOF.
+
+        A thread rather than a blocking `readline()` in the caller: it is what lets
+        `_read_response` give up on a deadline instead of hanging forever.
+        """
+        proc = self._proc
+        if proc is None or proc.stdout is None:
+            return
+        for line in proc.stdout:
+            self._lines.put(line)
+        self._lines.put(None)
+
     # -- protocol ----------------------------------------------------------
 
     def _write(self, payload: dict[str, Any]) -> None:
         if self._proc is None or self._proc.stdin is None:
             raise DriverError("driver is not running; call start() first")
-        self._proc.stdin.write(json.dumps(payload) + "\n")
-        self._proc.stdin.flush()
+        try:
+            self._proc.stdin.write(json.dumps(payload) + "\n")
+            self._proc.stdin.flush()
+        except (BrokenPipeError, OSError) as exc:
+            # A driver that died mid-session must surface as guidance, not as a raw
+            # broken pipe from deep inside the transport.
+            detail = "\n".join(self.stderr_tail[-8:]) or "(no stderr)"
+            raise DriverError(f"driver is not accepting input ({exc})\n{detail}") from exc
 
     def _notify(self, method: str, params: dict[str, Any]) -> None:
         self._write({"jsonrpc": "2.0", "method": method, "params": params})
@@ -178,10 +213,16 @@ class Driver:
             return self._read_response(request_id)
 
     def _read_response(self, request_id: int) -> dict[str, Any]:
-        assert self._proc is not None and self._proc.stdout is not None
+        deadline = time.monotonic() + CALL_TIMEOUT_SECONDS
         while True:
-            line = self._proc.stdout.readline()
-            if not line:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise self._timeout_error(request_id)
+            try:
+                line = self._lines.get(timeout=remaining)
+            except queue.Empty:
+                raise self._timeout_error(request_id)
+            if line is None:
                 detail = "\n".join(self.stderr_tail[-8:]) or "(no stderr)"
                 raise DriverError(f"driver closed stdout while awaiting {request_id}\n{detail}")
             line = line.strip()
@@ -196,6 +237,26 @@ class Driver:
             if "error" in message:
                 raise DriverError(f"{method_label(message)}: {message['error']}")
             return message.get("result", {})
+
+    def _timeout_error(self, request_id: int) -> DriverError:
+        """Abandon a call that never answered, and kill the driver so it is replaced.
+
+        The child is killed and `_proc` cleared, so `alive` is False and the cached
+        session is dropped — the next call starts a fresh driver instead of writing
+        into a wedged one.
+        """
+        proc, self._proc = self._proc, None
+        if proc is not None:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        return DriverError(
+            f"driver did not answer {request_id} within {CALL_TIMEOUT_SECONDS:g}s. "
+            "The usual cause is a page-owned JavaScript dialog (alert/confirm/"
+            "beforeunload) blocking the CDP call. The driver was killed; the next "
+            "call starts a fresh one."
+        )
 
     def list_tools(self) -> list[str]:
         result = self._request("tools/list", {})

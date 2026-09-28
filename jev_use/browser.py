@@ -173,6 +173,24 @@ def scroll_js(delta: int) -> str:
     )
 
 
+def navigate_js(url: str) -> str:
+    """Navigate, clearing any `beforeunload` handler first.
+
+    A page can register `onbeforeunload`; a navigation that triggers its prompt
+    blocks `Runtime.evaluate` until the dialog is answered, and nothing here answers
+    it — the call then hangs until the harness times out. Clearing the handler just
+    before navigating suppresses a prompt we would have had to accept anyway, and
+    changes nothing else about the page we are leaving.
+    """
+    return (
+        "(() => {"
+        "try { window.onbeforeunload = null; } catch (_) {}"
+        f"location.href = {json.dumps(url)};"
+        "return JSON.stringify({ok:true});"
+        "})()"
+    )
+
+
 # -- discovery --------------------------------------------------------------
 
 
@@ -862,7 +880,7 @@ def navigate_and_settle(driver: Driver, target: Target, url: str, settle: float)
     returned before the requested page had loaded.
     """
     before = _page_signature(driver, target)
-    _js(driver, target, f"location.href={json.dumps(url)};")
+    _js(driver, target, navigate_js(url))
     _wait_for_settle(driver, target, before, settle)
 
 
@@ -931,7 +949,7 @@ def execute(driver: Driver, target: Target, decision: Decision, observation: Obs
         _js(driver, target, scroll_js(delta))
         return
     if decision.kind == "navigate" and observation.navigate_url:
-        _js(driver, target, f"location.href={json.dumps(observation.navigate_url)};")
+        _js(driver, target, navigate_js(observation.navigate_url))
         return
     if decision.kind == "wait":
         time.sleep(1.0)

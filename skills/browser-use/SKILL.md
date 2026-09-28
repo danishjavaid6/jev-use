@@ -81,6 +81,10 @@ Cloudflare R2 billing — could not reach: the page redirected to a product
 * **Typing.** `type_text` needs a configured text model (`JEV_USE_TEXT_MODEL`); without
   one, only clicking, scrolling and reading are available.
 * **One tab at a time.** Sites are visited sequentially, not in parallel.
+* **A "driver did not answer" timeout.** The page raised a JavaScript dialog
+  (`alert`/`confirm`/`beforeunload`) that blocked the call. Just retry — the server
+  kills the stuck driver and starts a fresh one. Do **not** restart Chrome or reopen
+  the profile to recover; that loses the page you were on for no reason.
 
 ## Do not
 
