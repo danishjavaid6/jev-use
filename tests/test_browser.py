@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 
 import pytest
 
@@ -327,6 +328,124 @@ def test_target_map_is_keyed_by_ref() -> None:
     assert set(make_observation().target_map()) == {"0", "1", "2"}
 
 
+def test_duplicate_labels_are_disambiguated_not_dropped() -> None:
+    """Two controls that share a label must both stay selectable, or a real target
+    is lost; the hint is what keeps the option set mutually exclusive."""
+    payload = {
+        "url": "u",
+        "elements": [
+            {"ref": 0, "tag": "button", "text": "Add to cart", "pos": "top-right"},
+            {"ref": 1, "tag": "button", "text": "Add to cart", "pos": "bottom-right"},
+        ],
+    }
+    observation = browser.Observation(browser.Target(port=1, pid=2, window_id=3), payload)
+    descriptions = [c["description"] for c in observation.candidates]
+    assert len(descriptions) == 2, "both targets survive"
+    assert len(set(descriptions)) == 2, "and neither reads as a duplicate of the other"
+    assert "top-right" in descriptions[0]
+    assert "bottom-right" in descriptions[1]
+
+
+def test_a_huge_page_is_capped_goal_first() -> None:
+    elements = [
+        {"ref": i, "tag": "a", "text": f"link {i}"} for i in range(200)
+    ]
+    elements.append({"ref": 999, "tag": "input", "text": "Checkout", "fillable": True})
+    elements.append({"ref": 1000, "tag": "button", "text": "Checkout now"})
+    observation = browser.Observation(
+        browser.Target(port=1, pid=2, window_id=3),
+        {"url": "u", "elements": elements},
+        goal="finish checkout",
+    )
+    assert len(observation.candidates) == browser.MAX_CANDIDATES
+    labels = {c["label"] for c in observation.candidates}
+    assert "Checkout" in labels, "the field the goal needs must survive the cap"
+    assert "Checkout now" in labels, "and so must the goal-relevant button"
+
+
+def test_the_loop_decides_an_unambiguous_first_step_in_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A clear goal must not cost a model round trip on the first step."""
+
+    class Refuses:
+        def choose(self, *_a, **_k):
+            pytest.fail("the chooser must not be consulted for a clear goal")
+
+    observation = make_observation()
+    monkeypatch.setattr(browser, "snapshot", lambda *a, **k: observation)
+    result = browser._run_one(
+        None, target(), "click Learn more", Refuses(),
+        act=False, max_steps=1, min_confidence=0.4, settle=0.0,
+    )
+    assert result.steps[0].decision.source == "deterministic"
+    assert result.steps[0].decision.element_id == "0"
+
+
+def test_the_loop_settles_after_typing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Typing can trigger validation, autocomplete or a same-URL update; the next
+    snapshot must not race it."""
+    from jev_use.choosers import Decision
+
+    target_obj = browser.Target(port=1, pid=2, window_id=3)
+    obs = browser.Observation(
+        target_obj,
+        {"url": "u", "elements": [{"ref": 0, "tag": "input", "text": "Email", "fillable": True}]},
+        can_write=True,
+    )
+    settled: list[str] = []
+    monkeypatch.setattr(browser, "snapshot", lambda *a, **k: obs)
+    monkeypatch.setattr(browser, "_page_signature", lambda *a, **k: BEFORE)
+    monkeypatch.setattr(browser, "type_into", lambda *a, **k: None)
+    monkeypatch.setattr(
+        browser, "_wait_for_settle", lambda d, t, b, s: settled.append("yes")
+    )
+
+    class Chooser:
+        def choose(self, *_a):
+            return Decision(kind="type_text", element_id="0", confidence=0.9)
+
+    class Writer:
+        available = True
+
+        def write(self, *_a, **_k):
+            return "me@example.com"
+
+    browser._run_one(
+        None, target_obj, "fill Email", Chooser(),
+        act=True, max_steps=1, min_confidence=0.4, settle=0.5, writer=Writer(),
+    )
+    assert settled == ["yes"], "typing must settle before the next snapshot"
+
+
+def test_replay_refuses_an_ambiguous_description(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two elements matching one stored description must not silently pick the first."""
+    target_obj = browser.Target(port=1, pid=2, window_id=3)
+    obs = browser.Observation(
+        target_obj, {"url": "u", "elements": [{"ref": 0, "tag": "a", "text": "Open"}]}
+    )
+    obs._candidates.append(dict(obs._candidates[0], id="9"))
+    monkeypatch.setattr(browser, "snapshot", lambda *a, **k: obs)
+    monkeypatch.setattr(browser, "execute", lambda *a, **k: None)
+
+    result = browser.replay(
+        None, target_obj, "g", [{"kind": "click_element", "target": 'a "Open"'}], act=True
+    )
+    assert result.outcome == "replay_miss"
+    assert "2 elements match" in result.steps[0].note
+
+
+def test_the_table_script_filters_duplicates_and_decoration() -> None:
+    """The DOM-aware half of candidate filtering lives in the injected script."""
+    assert "removeAttribute('data-jev-ref')" in browser.TABLE_JS, (
+        "stale markers from the previous scan must be cleared, or click_js can"
+        " resolve a ref to an element filtered out this time"
+    )
+    assert "accepted.has" in browser.TABLE_JS, "nested duplicate controls, via a Set"
+    assert "javascript:" in browser.TABLE_JS, "label-less decorative links"
+    assert "pos:" in browser.TABLE_JS, "a position hint for disambiguation"
+
+
 def test_operations_hide_click_when_the_page_offers_nothing() -> None:
     target = browser.Target(port=9222, pid=1, window_id=2)
     empty = browser.Observation(target, {"url": "u", "elements": []})
@@ -510,6 +629,132 @@ def test_read_can_skip_waiting_entirely() -> None:
     assert driver.calls == 1
 
 
+# -- settling ---------------------------------------------------------------
+
+
+BEFORE = browser.PageSignature("u", "complete", 10, 100, 0)
+
+
+def _sig(
+    *, url: str = "u", state: str = "complete", nodes: int = 10, text: int = 100, fields: int = 0
+) -> browser.PageSignature:
+    return browser.PageSignature(url, state, nodes, text, fields)
+
+
+def test_wait_for_settle_waits_when_the_page_has_not_changed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """THE regression this function was fixed for: a click that starts a slow
+    request leaves the page perfectly still. Stillness is not settled, so the wait
+    must run out `settle` instead of returning the pre-update page."""
+    monkeypatch.setattr(
+        browser, "snapshot", lambda *a, **k: pytest.fail("the poll must not snapshot")
+    )
+    monkeypatch.setattr(browser, "_page_signature", lambda *a, **k: BEFORE)
+    started = time.perf_counter()
+    assert browser._wait_for_settle(object(), target(), BEFORE, 0.5) is None
+    assert time.perf_counter() - started >= 0.4, "no early exit without a change"
+
+
+def test_wait_for_settle_returns_once_a_change_goes_quiet(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Changed from the pre-action state, then stable, returns inside the window."""
+    monkeypatch.setattr(browser, "_page_signature", lambda *a, **k: _sig(nodes=20, text=200))
+    monkeypatch.setattr(
+        browser, "snapshot", lambda *a, **k: pytest.fail("the poll must not snapshot")
+    )
+    started = time.perf_counter()
+    assert browser._wait_for_settle(None, target(), BEFORE, 2.0) is None
+    assert time.perf_counter() - started < 1.5, "changed then quiet returns early"
+
+
+def test_wait_for_settle_sees_a_text_only_update(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Element count alone misses a text-only update, so text length is in the
+    signature too."""
+    monkeypatch.setattr(browser, "_page_signature", lambda *a, **k: _sig(text=200))
+    started = time.perf_counter()
+    assert browser._wait_for_settle(None, target(), BEFORE, 2.0) is None
+    assert time.perf_counter() - started < 1.5
+
+
+def test_wait_for_settle_sees_a_value_only_change() -> None:
+    """Typing changes `input.value`, which never appears in `body.innerText`, so the
+    signature must carry form state or a normal field entry looks like "no change"."""
+    assert browser._dom_changed(BEFORE, _sig(fields=12))
+    assert "input,textarea,select" in browser.SETTLE_JS
+
+
+def test_wait_for_settle_does_not_return_while_still_loading(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A URL change with `readyState == 'loading'` is a half-loaded document, not a
+    settled one, so it must not end the wait."""
+    monkeypatch.setattr(
+        browser, "_page_signature",
+        lambda *a, **k: _sig(url="https://new", state="loading", nodes=5, text=5),
+    )
+    started = time.perf_counter()
+    assert browser._wait_for_settle(None, target(), BEFORE, 0.5) is None
+    assert time.perf_counter() - started >= 0.4, "must not return mid-navigation"
+
+
+def test_wait_for_settle_does_not_return_while_interactive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`interactive` is not `complete`: scripts and data are still arriving."""
+    monkeypatch.setattr(
+        browser, "_page_signature",
+        lambda *a, **k: _sig(url="https://new", state="interactive", nodes=5, text=5),
+    )
+    started = time.perf_counter()
+    assert browser._wait_for_settle(None, target(), BEFORE, 0.5) is None
+    assert time.perf_counter() - started >= 0.4
+
+
+def test_wait_for_settle_returns_the_new_url_once_loaded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        browser, "_page_signature",
+        lambda *a, **k: _sig(url="https://new", state="complete", nodes=5, text=5),
+    )
+    assert browser._wait_for_settle(None, target(), BEFORE, 2.0) == "https://new"
+
+
+def test_wait_for_settle_honours_the_deadline_when_the_page_keeps_changing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A page that never goes quiet must not block: `settle` stays the hard bound."""
+    state = {"n": 0}
+
+    def sig(*_a, **_k):
+        state["n"] += 1
+        return _sig(nodes=10 + state["n"], text=100 + state["n"])
+
+    monkeypatch.setattr(browser, "_page_signature", sig)
+    started = time.perf_counter()
+    assert browser._wait_for_settle(None, target(), BEFORE, 0.5) is None
+    assert time.perf_counter() - started < 2.0
+
+
+def test_navigate_and_settle_baselines_on_the_live_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Waiting against the target's cached url could be stale or empty, so the
+    baseline is read from the page immediately before navigating."""
+    order: list[str] = []
+    monkeypatch.setattr(
+        browser,
+        "_page_signature",
+        lambda *a: (order.append("signature"), BEFORE)[1],
+    )
+    monkeypatch.setattr(browser, "_js", lambda *a: order.append("js") or "{}")
+    monkeypatch.setattr(browser, "_wait_for_settle", lambda *a: None)
+    browser.navigate_and_settle(None, target(), "https://dest", 0.3)
+    assert order == ["signature", "js"], "read the live URL before navigating"
+
+
 def test_readouts_lead_with_url_and_title() -> None:
     readouts = make_observation().readouts()
     assert readouts[0] == "https://example.test/page"
@@ -610,6 +855,243 @@ def test_plan_skips_unexecuted_steps() -> None:
     assert browser.plan_from(browser.Result(goal="g", steps=[step])) == []
 
 
+def test_the_cache_key_fingerprints_controls_not_page_text() -> None:
+    """A clock or a count must not change the key; a different control set must."""
+    target = browser.Target(port=1, pid=2, window_id=3)
+    base = {
+        "url": "u",
+        "title": "T",
+        "elements": [{"ref": 0, "tag": "a", "text": "Learn more"}],
+    }
+    other_controls = dict(base, elements=[{"ref": 0, "tag": "a", "text": "Buy now"}])
+    other_page = dict(base, url="v")
+
+    assert browser.Observation(target, base).fingerprint() == (
+        browser.Observation(target, base).fingerprint()
+    )
+    assert browser.Observation(target, base).fingerprint() != (
+        browser.Observation(target, other_controls).fingerprint()
+    )
+    assert browser.Observation(target, base).fingerprint() != (
+        browser.Observation(target, other_page).fingerprint()
+    )
+
+
+def test_a_cache_probe_is_reused_as_the_first_observation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """On a cache miss the probe that built the key was discarded and the loop
+    snapshotted again immediately. It seeds the first step now."""
+    from jev_use.cache import PlanCache
+    from jev_use.choosers import MockChooser
+
+    calls: list[int] = []
+
+    def fake_snapshot(driver, tg, goal="", can_write=False):
+        calls.append(1)
+        return browser.Observation(tg, {"url": "https://x.test", "elements": []})
+
+    monkeypatch.setattr(browser, "snapshot", fake_snapshot)
+    result = browser.run(
+        object(), browser.Target(port=1, pid=2, window_id=3), "goal",
+        MockChooser(script=[{"kind": "done"}]), act=True,
+        cache=PlanCache(tmp_path / "c.json"),
+    )
+    assert result.outcome == "done"
+    assert len(calls) == 1, "the probe must seed the first step, not be thrown away"
+
+
+def test_a_partial_replay_miss_does_not_replan_from_a_stale_probe(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """The replay may act before it misses, so the probe no longer describes the
+    screen; replanning must re-observe rather than reuse it."""
+    from jev_use.cache import PlanCache
+    from jev_use.choosers import Decision
+
+    target_obj = browser.Target(port=1, pid=2, window_id=3)
+    obs = browser.Observation(
+        target_obj, {"url": "u", "elements": [{"ref": 0, "tag": "a", "text": "A"}]}
+    )
+    calls: list[str] = []
+
+    def fake_snapshot(driver, tg, goal="", can_write=False):
+        calls.append(goal)
+        return obs
+
+    monkeypatch.setattr(browser, "snapshot", fake_snapshot)
+    monkeypatch.setattr(browser, "_page_signature", lambda *a, **k: BEFORE)
+    monkeypatch.setattr(browser, "_wait_for_settle", lambda *a, **k: None)
+    monkeypatch.setattr(browser, "execute", lambda *a, **k: None)
+
+    class Chooser:
+        def choose(self, *_a):
+            return Decision(kind="done")
+
+    cache = PlanCache(tmp_path / "c.json")
+    cache.put(
+        f"{obs.fingerprint()}|g", "g",
+        [{"kind": "click_element", "target": 'a "A"'},
+         {"kind": "click_element", "target": 'a "Gone"'}],
+    )
+
+    browser.run(object(), target_obj, "g", Chooser(), act=True, cache=cache)
+    # probe. Then the replay acts, re-observes, and misses. Then the re-plan must
+    # take a THIRD, fresh snapshot rather than reuse the stale probe.
+    assert len(calls) == 3, "the re-plan must re-observe"
+
+
+def test_the_decomposition_path_does_not_reuse_the_probe(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """`read()` waits for the page to render, so the probe taken before it may
+    predate the controls the plan will act on. The decomposition path re-observes."""
+    from jev_use.cache import PlanCache
+    from jev_use.choosers import Decision
+
+    calls: list[str] = []
+
+    def fake_snapshot(driver, tg, goal="", can_write=False):
+        calls.append(goal)
+        return browser.Observation(tg, {"url": "https://x.test", "elements": []})
+
+    monkeypatch.setattr(browser, "snapshot", fake_snapshot)
+    monkeypatch.setattr(browser, "read", lambda *a, **k: "")
+
+    class Writer:
+        available = True
+
+        def decompose(self, goal, summary):
+            return ["step one", "step two"]
+
+        def write(self, *a, **k):
+            return "x"
+
+    class Chooser:
+        def choose(self, *_a):
+            return Decision(kind="done")
+
+    browser.run(
+        object(), browser.Target(port=1, pid=2, window_id=3), "g", Chooser(),
+        act=True, writer=Writer(), cache=PlanCache(tmp_path / "c.json"),
+    )
+    assert calls.count("g") == 1, "the probe is taken once"
+    assert calls == ["g", "step one", "step two"], "each subgoal is observed fresh"
+
+
+def test_replay_reobserves_after_an_in_place_action(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A same-URL SPA change must not leave step two resolving against stale refs."""
+    target_obj = browser.Target(port=1, pid=2, window_id=3)
+    first = browser.Observation(
+        target_obj, {"url": "u", "elements": [{"ref": 0, "tag": "a", "text": "Open"}]}
+    )
+    second = browser.Observation(
+        target_obj, {"url": "u", "elements": [{"ref": 0, "tag": "a", "text": "Confirm"}]}
+    )
+    pages = iter([first, second])
+    monkeypatch.setattr(browser, "snapshot", lambda *a, **k: next(pages))
+    monkeypatch.setattr(browser, "_page_signature", lambda *a, **k: BEFORE)
+    monkeypatch.setattr(browser, "_wait_for_settle", lambda *a, **k: None)
+    monkeypatch.setattr(browser, "execute", lambda *a, **k: None)
+
+    result = browser.replay(
+        None, target_obj, "g",
+        [{"kind": "click_element", "target": 'a "Open"'},
+         {"kind": "click_element", "target": 'a "Confirm"'}],
+        act=True,
+    )
+    assert result.outcome == "replayed"
+    assert result.snapshots == 2, "one initial + one re-observe between the entries"
+
+
+def test_replay_aborts_when_a_cached_click_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stale plan whose click no longer lands must not report success."""
+    target_obj = browser.Target(port=1, pid=2, window_id=3)
+    obs = browser.Observation(
+        target_obj, {"url": "u", "elements": [{"ref": 0, "tag": "a", "text": "Go"}]}
+    )
+    monkeypatch.setattr(browser, "snapshot", lambda *a, **k: obs)
+    monkeypatch.setattr(browser, "_page_signature", lambda *a, **k: BEFORE)
+    monkeypatch.setattr(
+        browser, "execute",
+        lambda *a, **k: (_ for _ in ()).throw(DriverError("click failed: ref not found")),
+    )
+    result = browser.replay(
+        None, target_obj, "g", [{"kind": "click_element", "target": 'a "Go"'}], act=True
+    )
+    assert result.outcome == "replay_miss"
+    assert "click failed" in result.steps[0].note
+
+
+def test_execute_fails_when_the_ref_is_gone(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`click_js` answers `ok:false`; that must raise, not be ignored."""
+    from jev_use.choosers import Decision
+
+    monkeypatch.setattr(
+        browser, "_js", lambda *a: '{"ok": false, "reason": "ref not found"}'
+    )
+    obs = browser.Observation(browser.Target(port=1, pid=2, window_id=3), {"url": "u", "elements": []})
+    with pytest.raises(DriverError):
+        browser.execute(
+            None, browser.Target(port=1, pid=2, window_id=3),
+            Decision(kind="click_element", element_id="0"), obs,
+        )
+
+
+def test_execute_propagates_a_driver_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A CDP/driver failure is not a completed click and must not be swallowed."""
+    from jev_use.choosers import Decision
+
+    def boom(*_a, **_k):
+        raise DriverError("page failed: cdp connection closed")
+
+    monkeypatch.setattr(browser, "_js", boom)
+    obs = browser.Observation(
+        browser.Target(port=1, pid=2, window_id=3), {"url": "u", "elements": []}
+    )
+    with pytest.raises(DriverError):
+        browser.execute(
+            None, browser.Target(port=1, pid=2, window_id=3),
+            Decision(kind="click_element", element_id="0"), obs,
+        )
+
+
+def test_disabled_controls_are_not_candidates() -> None:
+    """A disabled control cannot be activated, so offering it is an impossible
+    choice that only costs a step."""
+    payload = {
+        "url": "u",
+        "elements": [
+            {"ref": 0, "tag": "button", "text": "Save", "enabled": True},
+            {"ref": 1, "tag": "button", "text": "Delete", "enabled": False},
+        ],
+    }
+    observation = browser.Observation(browser.Target(port=1, pid=2, window_id=3), payload)
+    assert [c["label"] for c in observation.candidates] == ["Save"]
+    assert "1" not in observation.target_map()
+
+
+def test_execute_tolerates_a_result_lost_to_navigation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A click that navigates can unload the page before the eval returns; that is
+    not a click failure and must not abort the run."""
+    from jev_use.choosers import Decision
+
+    monkeypatch.setattr(browser, "_js", lambda *a: "")
+    obs = browser.Observation(
+        browser.Target(port=1, pid=2, window_id=3), {"url": "u", "elements": []}
+    )
+    browser.execute(  # must not raise
+        None, browser.Target(port=1, pid=2, window_id=3),
+        Decision(kind="click_element", element_id="0"), obs,
+    )
+
+
 def test_replay_aborts_when_a_description_is_gone(monkeypatch: pytest.MonkeyPatch) -> None:
     """A stale plan must stop, not guess."""
     payload = {"url": "u", "elements": [{"kind": "a", "ref": 0, "text": "something else"}]}
@@ -622,7 +1104,7 @@ def test_replay_aborts_when_a_description_is_gone(monkeypatch: pytest.MonkeyPatc
         [{"kind": "click_element", "target": 'a "Learn more"'}], act=True,
     )
     assert result.outcome == "replay_miss"
-    assert "no element described" in result.steps[0].note
+    assert "nothing described" in result.steps[0].note
 
 
 def test_browser_use_exposes_the_decompose_switch() -> None:

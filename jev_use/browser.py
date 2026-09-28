@@ -22,6 +22,7 @@ Free text is absent by design: Jev cannot generate strings.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import time
@@ -29,10 +30,10 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from . import host
-from .choosers import Decision, validate
+from .choosers import Decision, deterministic_decision, validate
 from .driver import Driver, DriverError
 from .host import BROWSER_BINARY_NAMES, argv0, chrome_user_data_root
 from .host import process_table as _process_table
@@ -58,21 +59,58 @@ SCROLL_PIXELS = 700
 TABLE_JS = r"""
 (() => {
   const sel = 'a,button,input,select,textarea,[role=button],[role=link],[onclick],[contenteditable=true]';
+  // Clear the previous scan's markers FIRST. Without this, an element that was
+  // tagged last time but is filtered this time keeps its old index, which can
+  // collide with a fresh one — and click_js, which looks a ref up with
+  // querySelector, would then find the stale element first and act on the wrong
+  // node.
+  document.querySelectorAll('[data-jev-ref]').forEach((old) => old.removeAttribute('data-jev-ref'));
+  // Accepted ancestors are tracked in a Set, so nothing is written to the DOM until
+  // a candidate is final and the nested-duplicate check never consults a marker.
+  const accepted = new Set();
   const out = [];
   let i = 0;
   for (const e of Array.from(document.querySelectorAll(sel))) {
     const r = e.getBoundingClientRect();
     if (r.width < 4 || r.height < 4) continue;
     if (r.bottom < 0 || r.top > innerHeight) continue;
-    if (getComputedStyle(e).visibility === 'hidden') continue;
+    const style = getComputedStyle(e);
+    if (style.visibility === 'hidden' || style.display === 'none') continue;
+    const text = (e.innerText || e.value || e.getAttribute('aria-label')
+             || e.getAttribute('placeholder') || e.getAttribute('name')
+             || e.getAttribute('href') || '').trim().replace(/\s+/g, ' ').slice(0, 90);
+    const tag = e.tagName.toLowerCase();
+    // A link with no label and no real destination is decoration, not a target.
+    const href = e.getAttribute('href') || '';
+    if (tag === 'a' && !text && (!href || href === '#' || href.startsWith('javascript:'))) continue;
+    // A control nested inside an already-accepted control with the same label is
+    // the same target twice (an icon inside its button, a span inside its link).
+    // Offering both splits the confidence vote for no gain. Walk to the nearest
+    // accepted ancestor; only that one is compared.
+    let anc = e.parentElement, nested = false;
+    while (anc) {
+      if (accepted.has(anc)) {
+        const ptext = (anc.innerText || '').trim().replace(/\s+/g, ' ').slice(0, 90);
+        if (ptext && ptext === text) nested = true;
+        break;
+      }
+      anc = anc.parentElement;
+    }
+    if (nested) continue;
+    // A coarse position, so two genuinely different controls that happen to share
+    // a label can be told apart without dropping either one.
+    const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+    const pos = (cy < innerHeight / 3 ? 'top' : cy > 2 * innerHeight / 3 ? 'bottom' : 'middle')
+              + '-' + (cx < innerWidth / 3 ? 'left' : cx > 2 * innerWidth / 3 ? 'right' : 'centre');
     e.setAttribute('data-jev-ref', String(i));
+    accepted.add(e);
     out.push({
       ref: i,
-      tag: e.tagName.toLowerCase(),
+      tag: tag,
       fillable: e.matches('input,textarea,select') || e.isContentEditable === true,
-      text: (e.innerText || e.value || e.getAttribute('aria-label')
-             || e.getAttribute('placeholder') || e.getAttribute('name')
-             || e.getAttribute('href') || '').trim().replace(/\s+/g, ' ').slice(0, 90),
+      enabled: !e.disabled && e.getAttribute('aria-disabled') !== 'true',
+      pos: pos,
+      text: text,
     });
     i++;
   }
@@ -394,6 +432,67 @@ def attach(
 
 # -- observation ------------------------------------------------------------
 
+#: Cap on the option set, matching the Android engine. Past this the choice stops
+#: being meaningful and the confidence score stops being readable. Reached only on
+#: very large pages, and only after the goal-relevant controls are kept.
+MAX_CANDIDATES = 120
+
+
+def _goal_terms(goal: str) -> set[str]:
+    """Words worth matching a control's label against, ignoring short filler."""
+    return {t for t in re.findall(r"[a-z0-9]+", (goal or "").lower()) if len(t) >= 3}
+
+
+def _rank_candidates(
+    candidates: list[dict[str, Any]], goal: str = ""
+) -> list[dict[str, Any]]:
+    """Make the option set executable, mutually exclusive, and bounded.
+
+    Three rules:
+
+    * **Disabled controls are dropped.** A disabled button cannot be activated, so
+      offering it is a choice the run can only refuse — and, once picked, a wasted
+      step. `TABLE_JS` records `enabled` for exactly this decision.
+    * **Duplicates are disambiguated, not dropped.** A repeated label gets a coarse
+      positional hint so both stay selectable; dropping one would remove a real
+      target. This mirrors the desktop engine, which appends a position for exactly
+      this reason.
+    * **The set is capped, goal-first.** A page can offer hundreds of controls, and
+      the Android engine caps at 120 for the same reason. The list is reordered only
+      when the cap is actually exceeded — by fillable, labelled, and overlap with the
+      goal — so an ordinary page keeps its natural order.
+    """
+    candidates = [c for c in candidates if c.get("enabled", True)]
+
+    counts: dict[str, int] = {}
+    for candidate in candidates:
+        counts[candidate["description"]] = counts.get(candidate["description"], 0) + 1
+    for candidate in candidates:
+        if counts[candidate["description"]] > 1:
+            hint = candidate.get("pos") or f'element {candidate["id"]}'
+            candidate["description"] = f'{candidate["description"]} ({hint})'
+
+    if len(candidates) <= MAX_CANDIDATES:
+        return candidates
+
+    terms = _goal_terms(goal)
+
+    def score(candidate: dict[str, Any]) -> int:
+        value = 0
+        if candidate["fillable"]:
+            value += 4
+        if candidate["label"].strip():
+            value += 2
+        if candidate["enabled"]:
+            value += 1
+        label = candidate["label"].lower()
+        if terms and any(term in label for term in terms):
+            value += 8
+        return value
+
+    # Stable: candidates of equal score keep document order.
+    return sorted(candidates, key=score, reverse=True)[:MAX_CANDIDATES]
+
 
 class Observation:
     """One page snapshot, shaped for the chooser.
@@ -408,6 +507,7 @@ class Observation:
         payload: dict[str, Any],
         navigate_url: str | None = None,
         can_write: bool = False,
+        goal: str = "",
     ):
         self.can_write = can_write
         self.target = target
@@ -416,21 +516,26 @@ class Observation:
         self.navigate_url = navigate_url
         self.pid = target.pid
         self.window_id = target.window_id
-        self._candidates = [
-            {
-                "id": str(el["ref"]),
-                "role": el.get("tag", "element"),
-                "label": el.get("text", ""),
-                "description": (
-                    f'{el.get("tag", "element")} "{el.get("text", "")}"'
-                    if el.get("text")
-                    else el.get("tag", "element")
-                ),
-                "fillable": bool(el.get("fillable")),
-                "frame": None,
-            }
-            for el in payload.get("elements", [])
-        ]
+        self._candidates = _rank_candidates(
+            [
+                {
+                    "id": str(el["ref"]),
+                    "role": el.get("tag", "element"),
+                    "label": el.get("text", ""),
+                    "description": (
+                        f'{el.get("tag", "element")} "{el.get("text", "")}"'
+                        if el.get("text")
+                        else el.get("tag", "element")
+                    ),
+                    "fillable": bool(el.get("fillable")),
+                    "enabled": bool(el.get("enabled", True)),
+                    "pos": el.get("pos", ""),
+                    "frame": None,
+                }
+                for el in payload.get("elements", [])
+            ],
+            goal,
+        )
         self._fields = [c for c in self._candidates if c["fillable"]]
 
     @property
@@ -487,6 +592,19 @@ class Observation:
         shown += [c["description"] for c in self._candidates[:limit]]
         return shown
 
+    def fingerprint(self) -> str:
+        """A stable signature of the controls a plan could act on — the cache key.
+
+        Deliberately the interactive structure (control roles and labels) and not
+        page text: a clock, a cart count or a relative timestamp would change it on
+        every visit and turn every replay into a miss. Two visits to the same page
+        with the same controls are the same plan target, which is exactly the
+        condition under which a stored plan is still valid.
+        """
+        basis = sorted(f'{c["role"]}|{c["label"]}' for c in self._candidates)
+        digest = hashlib.sha1("\n".join(basis).encode("utf-8")).hexdigest()[:12]
+        return f"{self.url}|{self.title}|{digest}"
+
 
 def _js(driver: Driver, target: Target, javascript: str) -> str:
     return driver.call(
@@ -518,7 +636,13 @@ def snapshot(
     payload = _parse_js_payload(_js(driver, target, TABLE_JS))
     match = URL_PATTERN.search(goal or "")
     target.url = payload.get("url") or target.url
-    return Observation(target, payload, match.group(0) if match else None, can_write=can_write)
+    return Observation(
+        target,
+        payload,
+        match.group(0) if match else None,
+        can_write=can_write,
+        goal=goal,
+    )
 
 
 # `nodes` is the settle signal, not the text. Text is a bad one: a clock, a
@@ -618,6 +742,130 @@ def _parse_js_string(raw: str) -> str:
         return text
 
 
+# -- settling ---------------------------------------------------------------
+
+# The settle poll asks exactly one question — "has the page moved?" — so it must
+# not rebuild the candidate table to ask it. `TABLE_JS` is ~150 ms of
+# querySelectorAll, getComputedStyle and a DOM write per element; the old poll ran
+# it on every iteration and threw away everything except `.url`. This probe is a
+# few milliseconds. `text` is the *length* of the visible text, so a text-only
+# update is visible without shipping the text itself.
+SETTLE_JS = (
+    "JSON.stringify({url: location.href, state: document.readyState, "
+    "nodes: document.getElementsByTagName('*').length, "
+    "text: document.body ? document.body.innerText.length : 0, "
+    # `fields` is the summed length of the values in every form control. Typing
+    # changes an input's `.value`, which never appears in `body.innerText`, so
+    # without this a normal field entry looked like "no change" and settling after
+    # typing burned the whole timeout.
+    "fields: (() => { let n = 0; "
+    "for (const f of document.querySelectorAll('input,textarea,select')) "
+    "{ if (f.value) n += f.value.length + 1; } return n; })()})"
+)
+
+#: How many consecutive quiet probes are required *after* a change is seen. Each
+#: probe is ~200 ms apart, so this is the quiet window in units of 200 ms. One was
+#: too short: a spinner or a second async update can land well after 200 ms, so the
+#: page looks quiet and then moves again.
+SETTLE_QUIET_PROBES = 3
+
+
+class PageSignature(NamedTuple):
+    """The cheap, candidate-free reading the settle poll compares."""
+
+    url: str
+    state: str
+    nodes: int
+    text: int
+    fields: int
+
+
+def _page_signature(driver: Driver, target: Target) -> PageSignature:
+    """A cheap reading of the page, without building the candidate table."""
+    payload = _parse_js_payload(_js(driver, target, SETTLE_JS))
+    return PageSignature(
+        payload.get("url") or "",
+        payload.get("state") or "",
+        int(payload.get("nodes") or 0),
+        int(payload.get("text") or 0),
+        int(payload.get("fields") or 0),
+    )
+
+
+def _dom_changed(before: PageSignature, now: PageSignature) -> bool:
+    """Whether the DOM part of a signature moved (ignores url and readyState)."""
+    return (now.nodes, now.text, now.fields) != (before.nodes, before.text, before.fields)
+
+
+def _wait_for_settle(
+    driver: Driver, target: Target, before: PageSignature, settle: float
+) -> str | None:
+    """Wait for the page to move after an action, cheaply.
+
+    `before` is the signature taken immediately before the action. Returns the new
+    URL when one was seen, else `None`.
+
+    The wait ends early, but only on evidence:
+
+    * the page must first CHANGE — a URL change or a DOM change (element count +
+      text length) — and then
+    * hold still for `SETTLE_QUIET_PROBES` consecutive probes, and
+    * be fully loaded: `readyState == "complete"`, not merely `!= "loading"`.
+      `interactive` fires while scripts and data are still arriving, so accepting it
+      would settle a page that has not finished becoming itself.
+
+    Requiring the change FIRST is the whole point, and it is the bug the first cut
+    of this function had. Stillness on its own is not evidence: a click that fires
+    an async request leaves the page perfectly still for the first few hundred
+    milliseconds, so treating "two equal counts" as settled handed Jev the
+    pre-update page.
+
+    The `readyState` guard is the second bug: returning the instant the URL changed
+    handed Jev a half-loaded document. A client-side route change keeps `complete`
+    (the document never reloads) and is governed by the DOM-quiet rule instead.
+    """
+    deadline = time.perf_counter() + settle
+    changed = False
+    quiet = 0
+    previous: PageSignature | None = None
+    while time.perf_counter() < deadline:
+        try:
+            signature = _page_signature(driver, target)
+        except DriverError:
+            time.sleep(0.2)
+            continue
+        if signature.url and signature.url != before.url:
+            changed = True
+        if _dom_changed(before, signature):
+            changed = True
+        # Only `complete` is settled. `loading` and `interactive` both mean the
+        # document is still arriving, so nothing is settled until they end.
+        if changed and signature.state == "complete":
+            if previous is not None and not _dom_changed(previous, signature):
+                quiet += 1
+                if quiet >= SETTLE_QUIET_PROBES:
+                    return signature.url if signature.url != before.url else None
+            else:
+                quiet = 0
+            previous = signature
+        time.sleep(0.2)
+    return None
+
+
+def navigate_and_settle(driver: Driver, target: Target, url: str, settle: float) -> None:
+    """Point the page at `url` and wait for it to actually arrive.
+
+    The baseline signature is read from the LIVE page immediately before navigating.
+    Comparing against the target's cached `url` was wrong: it can be stale — the page
+    may have changed outside Jev between calls — or empty on a freshly attached
+    target, in which case the first probe already looked different and the wait
+    returned before the requested page had loaded.
+    """
+    before = _page_signature(driver, target)
+    _js(driver, target, f"location.href={json.dumps(url)};")
+    _wait_for_settle(driver, target, before, settle)
+
+
 # -- the loop ---------------------------------------------------------------
 
 
@@ -645,15 +893,38 @@ class Result:
         return sum(1 for s in self.steps if s.executed)
 
 
+def _action_result(driver: Driver, target: Target, javascript: str) -> dict[str, Any]:
+    """The parsed result of an action script.
+
+    Only an UNPARSEABLE reply is tolerated, and only because it has a benign cause:
+    a click that navigates can unload the page out from under the eval, so there is
+    no JSON left to read.
+
+    A `DriverError` from the driver call itself — the CDP connection failed, the
+    driver refused, the child exited — is a real failure and must propagate. Catching
+    it here would report a broken driver as a completed action, which is worse than
+    the ignored `ok:false` this replaced.
+    """
+    raw = _js(driver, target, javascript)
+    try:
+        return _parse_js_payload(raw)
+    except DriverError:
+        return {"ok": True}
+
+
 def type_into(driver: Driver, target: Target, ref: str, text: str) -> None:
-    _js(driver, target, type_js(int(ref), text))
+    result = _action_result(driver, target, type_js(int(ref), text))
+    if not result.get("ok"):
+        raise DriverError(f"type failed: {result.get('reason', 'unknown')}")
 
 
 def execute(driver: Driver, target: Target, decision: Decision, observation: Observation) -> None:
     if decision.kind == "type_text":
         raise ValueError("type_text needs the text resolved first; use run()")
     if decision.kind == "click_element":
-        _js(driver, target, click_js(int(decision.element_id or 0)))
+        result = _action_result(driver, target, click_js(int(decision.element_id or 0)))
+        if not result.get("ok"):
+            raise DriverError(f"click failed: {result.get('reason', 'unknown')}")
         return
     if decision.kind in ("scroll_down", "scroll_up"):
         delta = SCROLL_PIXELS if decision.kind == "scroll_down" else -SCROLL_PIXELS
@@ -679,19 +950,34 @@ def _run_one(
     min_confidence: float,
     settle: float,
     writer: Any = None,
+    observation: Observation | None = None,
 ) -> Result:
-    """One goal, one Jev loop. No planning here — see run()."""
+    """One goal, one Jev loop. No planning here — see run().
+
+    `observation` seeds the first step: `run()` may already hold a fresh snapshot
+    (the one it took to build the cache key), and re-taking it would be a wasted
+    ~150 ms. It is consumed once and every later step re-observes.
+    """
     started = time.perf_counter()
     result = Result(goal=goal)
     history: list[str] = []
     can_write = writer is not None and writer.available
+    pending = observation
 
     for index in range(max_steps):
-        observation = snapshot(driver, target, goal, can_write=can_write)
+        if pending is not None:
+            observation = pending
+            pending = None
+        else:
+            observation = snapshot(driver, target, goal, can_write=can_write)
         result.snapshots += 1
         result.url = observation.url
 
-        decision = validate(chooser.choose(goal, observation, history), observation)
+        # First step, unambiguous goal: decide it in code rather than paying for a
+        # model round trip. Later steps always go to the chooser.
+        fixed = deterministic_decision(goal, observation) if index == 0 else None
+        chosen = fixed if fixed is not None else chooser.choose(goal, observation, history)
+        decision = validate(chosen, observation)
         if not decision.accepted:
             result.steps.append(
                 Step(index, decision, observation, False, f"refused: {decision.rejection}")
@@ -733,20 +1019,29 @@ def _run_one(
 
         note = f"{decision.kind} {label} (conf {decision.confidence:.2f})"
         if act:
-            before = observation.url
-            if decision.kind == "type_text" and text is not None:
-                type_into(driver, target, decision.element_id or "0", text)
-            else:
-                execute(driver, target, decision, observation)
-            if decision.kind in ("click_element", "navigate"):
-                deadline = time.perf_counter() + settle
-                while time.perf_counter() < deadline:
-                    try:
-                        if snapshot(driver, target, goal, can_write).url != before:
-                            break
-                    except DriverError:
-                        pass
-                    time.sleep(0.2)
+            # Typing is settled too: validation, autocomplete, a submit handler or a
+            # same-URL React update can all follow a keystroke, and the next step's
+            # snapshot would otherwise race them. Scroll and wait are not.
+            settles = decision.kind in ("click_element", "navigate", "type_text")
+            # The baseline is taken BEFORE the action, and only when it will be used:
+            # waiting against a pre-action signature is what lets the poll tell "the
+            # page changed" from "the page has not started changing yet".
+            before = _page_signature(driver, target) if settles else None
+            try:
+                if decision.kind == "type_text" and text is not None:
+                    type_into(driver, target, decision.element_id or "0", text)
+                else:
+                    execute(driver, target, decision, observation)
+            except DriverError as exc:
+                result.steps.append(
+                    Step(index, decision, observation, False, f"failed: {exc}")
+                )
+                result.outcome = "action_failed"
+                break
+            if settles:
+                # Poll a cheap signal, never the candidate table. The next step
+                # re-observes anyway, so the poll only decides how long to wait.
+                _wait_for_settle(driver, target, before, settle)
             note = f"acted: {note}"
         else:
             note = f"would: {note}"
@@ -818,20 +1113,39 @@ def replay(
         if kind in ("scroll_down", "scroll_up"):
             decision = Decision(kind=kind, confidence=1.0, source="cache")
         else:
-            found = next(
-                (c for c in observation.candidates if c["description"] == wanted), None
-            )
-            if found is None:
+            # Resolve only within the elements LEGAL for this operation, so a cached
+            # click cannot land on a non-clickable element or typing on a field.
+            legal = observation.targets_for(kind)
+            matches = [c for c in legal if c["description"] == wanted]
+            if len(matches) != 1:
+                # Exactly one, or it is not replayable. Zero means the target is gone;
+                # more than one means the description is ambiguous and silently
+                # taking the first could act on the wrong control.
+                reason = (
+                    f"nothing described {wanted!r}"
+                    if not matches
+                    else f"{len(matches)} elements match {wanted!r}"
+                )
                 result.steps.append(
                     Step(index, Decision(kind=kind, source="cache"), observation, False,
-                         f"replay_miss: no element described {wanted!r}")
+                         f"replay_miss: {reason}")
                 )
                 result.outcome = "replay_miss"
                 result.seconds = time.perf_counter() - started
                 return result
             decision = Decision(
-                kind=kind, element_id=found["id"], confidence=1.0, source="cache"
+                kind=kind, element_id=matches[0]["id"], confidence=1.0, source="cache"
             )
+
+        # A cached action passes the same gate a live one does.
+        decision = validate(decision, observation)
+        if not decision.accepted:
+            result.steps.append(
+                Step(index, decision, observation, False, f"replay_miss: {decision.rejection}")
+            )
+            result.outcome = "replay_miss"
+            result.seconds = time.perf_counter() - started
+            return result
 
         label = wanted or kind
         text: str | None = None
@@ -855,26 +1169,40 @@ def replay(
 
         note = f"cache: {kind} {label}"
         if act:
-            before = observation.url
-            if kind == "type_text" and text is not None:
-                type_into(driver, target, decision.element_id or "0", text)
-            elif kind in ("scroll_down", "scroll_up"):
-                execute(driver, target, decision, observation)
-            else:
-                execute(driver, target, decision, observation)
-            if kind in ("click_element", "navigate"):
-                deadline = time.perf_counter() + settle
-                while time.perf_counter() < deadline:
-                    try:
-                        fresh = snapshot(driver, target, goal, can_write)
-                        result.snapshots += 1
-                        if fresh.url != before:
-                            observation = fresh
-                            result.url = fresh.url
-                            break
-                    except DriverError:
-                        pass
-                    time.sleep(0.2)
+            has_next = index < len(plan) - 1
+            # A state-changing action is settled even when it is LAST, so a final
+            # click does not return `replayed` while the transition is still underway.
+            # Only the expensive re-dump is skipped when nothing later needs it.
+            settles = kind in ("click_element", "navigate", "type_text")
+            before = _page_signature(driver, target) if settles else None
+            try:
+                if kind == "type_text" and text is not None:
+                    type_into(driver, target, decision.element_id or "0", text)
+                else:
+                    execute(driver, target, decision, observation)
+            except DriverError as exc:
+                # A stale plan whose click no longer lands must abort, not report
+                # success. run() drops the entry and re-plans from a fresh snapshot.
+                result.steps.append(
+                    Step(index, decision, observation, False, f"replay_miss: {exc}")
+                )
+                result.outcome = "replay_miss"
+                result.seconds = time.perf_counter() - started
+                return result
+            if settles:
+                # The settle is cheap (three ~5 ms probes); the returned URL keeps the
+                # report honest for a final action, which gets no snapshot.
+                moved = _wait_for_settle(driver, target, before, settle)
+                if moved:
+                    result.url = moved
+            # Re-observe before the next entry, whatever the URL did. A same-URL
+            # in-place change leaves the previous observation stale, so the next
+            # description would resolve against elements that no longer exist or
+            # now mean something else.
+            if has_next:
+                observation = snapshot(driver, target, goal, can_write)
+                result.snapshots += 1
+                result.url = observation.url
             note = f"cache: acted {label}"
 
         result.steps.append(Step(index, decision, observation, act, note))
@@ -910,19 +1238,22 @@ def run(
     unchanged and everything still works.
     """
     started = time.perf_counter()
-    start_url = target.url
+    start_key = f"{target.url}|{goal}"
+    probe: Observation | None = None
 
     if cache is not None:
         # One snapshot buys an exact cache key. Keying on the goal alone would let a
         # plan recorded on one page replay against a different page that happens to
-        # share the goal. The replay needs this snapshot anyway, so it costs nothing.
+        # share the goal. The replay needs this snapshot anyway, so it costs nothing
+        # — and on a miss it seeds the first step rather than being thrown away.
         can_write = writer is not None and writer.available
         probe = snapshot(driver, target, goal, can_write=can_write)
-        # The key must be the page the plan STARTS from. Storing under the URL the
-        # run ended on means the next run — which starts where this one began — never
-        # matches, and the cache silently never hits.
-        start_url = probe.url
-        stored = cache.get(f"{start_url}|{goal}", goal)
+        # The key is the fingerprint of the page the plan STARTS from: URL, title and
+        # the interactive structure. Storing under the URL the run ended on means the
+        # next run — which starts where this one began — never matches, and the cache
+        # silently never hits.
+        start_key = f"{probe.fingerprint()}|{goal}"
+        stored = cache.get(start_key, goal)
         if stored:
             replayed = replay(
                 driver, target, goal, stored, act=act, settle=settle, writer=writer,
@@ -930,17 +1261,27 @@ def run(
             )
             if replayed.outcome == "replayed":
                 return replayed
-            cache.drop(f"{start_url}|{goal}", goal)  # stale: fall through and re-plan
+            cache.drop(start_key, goal)  # stale: fall through and re-plan
+            # The replay may have executed part of the plan before the miss, so the
+            # probe describes a screen that no longer exists. Re-observing is the only
+            # safe start for the re-plan.
+            probe = None
 
     if writer is None or not decompose:
         result = _run_one(
             driver, target, goal, chooser, act=act, max_steps=max_steps,
             min_confidence=min_confidence, settle=settle, writer=writer,
+            observation=probe,
         )
         if cache is not None and act and result.outcome == "done":
-            cache.put(f"{start_url}|{goal}", goal, plan_from(result))
+            cache.put(start_key, goal, plan_from(result))
         return result
 
+    # `read()` above waited for the page to render, so the cache probe — taken before
+    # that wait, and before the planner ran — may predate the very controls the plan
+    # will act on. The decomposition path starts from a FRESH observation rather than
+    # that stale one. (The probe is still reused on the non-decompose path below,
+    # where nothing waited on the page.)
     summary = ""
     try:
         summary = read(driver, target)
@@ -974,5 +1315,5 @@ def run(
     combined.seconds = time.perf_counter() - started
     combined.subgoals = subgoals
     if cache is not None and act and combined.outcome == "done":
-        cache.put(f"{start_url}|{goal}", goal, plan_from(combined))
+        cache.put(start_key, goal, plan_from(combined))
     return combined

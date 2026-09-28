@@ -125,6 +125,15 @@ class Driver:
         )
         self._notify("notifications/initialized", {})
 
+    @property
+    def alive(self) -> bool:
+        """True while the child process is still running.
+
+        Used to decide whether a cached session can be reused: a driver that has
+        exited would accept a write and then never answer it.
+        """
+        return self._proc is not None and self._proc.poll() is None
+
     def close(self) -> None:
         proc, self._proc = self._proc, None
         if proc is None:

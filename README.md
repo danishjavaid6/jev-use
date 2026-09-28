@@ -188,9 +188,20 @@ AT-SPI accessibility path, for comparison   567-750 / 1350 ms
 A Jev decision is ~200-400 ms. The driver's MCP protocol floor is 4 ms, so almost all
 of the cost is the work itself, not transport.
 
-* **Poll, never sleep.** After a click we poll for the URL to change, bounded. A
-  snapshot is 150 ms, so this returns the moment the page moves instead of burning a
-  fixed settle.
+* **Poll, never sleep — and poll something cheap.** After a click we wait for the
+  page to move, bounded. The wait used to re-run the whole ~150 ms candidate table on
+  every iteration (about eight across a 3 s settle) only to compare `.url`; it now
+  reads `location.href`, the element count, the text length and a cheap digest of
+  every form control's value. It returns early only on *evidence*: the page must
+  first change (URL or DOM), then hold quiet for several probes, and `readyState`
+  must be `complete` — not merely past `loading`, because `interactive` still means
+  scripts and data are arriving. Stillness on its own proves nothing (a click that
+  starts a slow request leaves the page perfectly still), and a URL change that is
+  still loading is a half-loaded document. Typing is settled the same way, since
+  validation, autocomplete and same-URL updates all follow a keystroke — and the
+  form-value term is what makes a normal entry register as a change at all, since it
+  never touches `body.innerText`. A page that never changes waits out `settle`, which
+  is the old, safe behaviour.
 * **Page-scoped candidates.** A DOM snapshot returns page elements, not browser chrome.
   On `example.com` the accessibility path offered 29 targets, **28 of them toolbar
   buttons**; the DOM offers the page.
@@ -240,6 +251,54 @@ service, or capture-plus-vision), not more tuning.
 deliberately unused: it dumps one activity's raw View tree, so it sees nothing inside
 a WebView, Compose or Flutter surface and would report an empty container where the
 real UI is.
+
+**Persistent `adb` was investigated and rejected.** The `adb` *server* already
+persists across calls; the per-command cost is spawning the `adb` *client* (the 21 ms
+floor in the table above), paid once per tap, swipe, keyevent and poll. There is no
+supported persistent-client mode — the interactive `adb shell` stream is the only
+alternative, and it does not suit `uiautomator`, whose dump is a one-shot CLI that
+must run to completion. Against a 2.1 s dump, saving ~21 ms per call is noise, so it
+is deliberately not pursued.
+
+### What the loop no longer pays for
+
+Beyond the per-primitive numbers, several costs were structural — paid per run or per
+decision rather than per primitive — and each is removed:
+
+* **The driver is a session, not a per-call process.** `browser_use`, `browser_read`
+  and `browser_extract` on one page used to spawn and tear down their own
+  `cua-driver`, re-running discovery (`ps`, up to two `/json/version` probes) and a
+  `list_windows` bind each time. One healthy driver and bind is kept and reused, and
+  dropped only when the child dies, the requested profile changes, or a call fails.
+* **A dump already taken is reused.** The browser's cache-key snapshot now seeds the
+  first step on a miss, and the Android planner's dump seeds the loop instead of being
+  re-taken — on Android that is ~2.1 s that no longer happens twice.
+* **A dead question is gone.** `key` is asked only when `press_key` is on the table,
+  which the browser and Android engines never do, so their decisions no longer carry a
+  six-option question that could not affect the answer.
+* **The candidate set is bounded and disambiguated.** Duplicate labels get a position
+  hint rather than being dropped, nested duplicates and label-less links are filtered
+  in the DOM, and a very large page is capped at 120 controls, goal-relevant first.
+* **Unambiguous first steps skip the model.** `back`, `home`, a scroll, a bare URL,
+  and a goal that names exactly one control are decided in code. The model is kept for
+  the choices that are genuinely ambiguous, and only on the first step, so a sticky
+  goal cannot be re-selected into a loop.
+* **Cache keys fingerprint the screen.** The browser keys on URL, title and the
+  interactive structure; Android keys on the window signature rather than the bare
+  app. Page text is deliberately excluded, so a clock or a count does not turn every
+  replay into a miss. Neither is a full screen hash — an ordinary Android tab or
+  fragment swap keeps the same window — so a stale plan is caught structurally
+  instead: every stored description must resolve to **exactly one** element *legal
+  for its operation* on the freshly dumped screen and then pass the same `validate`
+  a live decision does, a plan that resolves to none or to an ambiguous many aborts
+  rather than guessing, and an Android plan must **start** with a described target —
+  a plan that opens with `back`/`home`/`scroll`/`navigate` would act before anything
+  had validated the screen, so it is refused outright. When the screen cannot be
+  identified at all, caching is bypassed for that run rather than writing every
+  unreadable screen to one shared key. A click that fails to land aborts the replay
+  too, rather than being ignored and reported as success. The replay still skips the
+  ~2.1 s hierarchy dump after its *final* action, but keeps the cheap settle, so it
+  does not report success while a transition is still underway.
 
 ## Getting answers out of a page
 

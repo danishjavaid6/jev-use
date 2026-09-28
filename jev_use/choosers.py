@@ -8,8 +8,8 @@ Two implementations:
 
 * ``MockChooser``  - deterministic, credential-free. Replays a script or cycles
   through candidates. Used for dry runs, tests and replay.
-* ``JevChooser``   - TypeSafe's System One API. One parallel call, four typed
-  questions, returns a candidate id plus a calibrated confidence.
+* ``JevChooser``   - TypeSafe's System One API. One parallel call carrying up to
+  four typed questions, returns a candidate id plus a calibrated confidence.
 
 Both go through the same ``validate`` step, so the loop cannot tell them apart
 and cannot be made to execute an unvalidated action.
@@ -17,6 +17,7 @@ and cannot be made to execute an unvalidated action.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -83,6 +84,85 @@ def validate(decision: Decision, observation: Any) -> Decision:
             return decision
 
     return decision
+
+
+#: Leading filler verbs stripped before a goal is matched against a control label.
+_LEADING_VERB = re.compile(
+    r"^(?:please\s+)?(?:click|tap|press|open|go\s+to|goto|navigate\s+to|visit|select|choose|hit)\s+",
+    re.I,
+)
+# Whole-goal patterns, anchored at BOTH ends and tolerating only a polite filler
+# word. A prefix match would run the first clause of a compound goal and silently
+# drop the rest: "go back and open settings", "scroll down then tap Checkout" and
+# "go home after saving" must all reach Jev, which can weigh the whole instruction
+# (and choose `done`). Only a goal that IS the single action is decided here.
+_FILLER = r"(?:\s+(?:now|please))?"
+_BACK_GOAL = re.compile(
+    rf"^(?:please\s+)?(?:go\s+|press\s+)?(?:the\s+)?back{_FILLER}$", re.I
+)
+_HOME_GOAL = re.compile(
+    rf"^(?:please\s+)?(?:go\s+|press\s+)?(?:the\s+)?home{_FILLER}$", re.I
+)
+_SCROLL_DOWN_GOAL = re.compile(rf"^(?:please\s+)?scroll\s+down{_FILLER}$", re.I)
+_SCROLL_UP_GOAL = re.compile(rf"^(?:please\s+)?scroll\s+up{_FILLER}$", re.I)
+
+
+def _normalize(text: str) -> str:
+    return re.sub(r"\s+", " ", (text or "").strip().lower())
+
+
+def deterministic_decision(goal: str, observation: Any) -> Decision | None:
+    """Decide an unambiguous action in code, without a model round trip.
+
+    Jev is valuable exactly where the choice is ambiguous; where it is not, the
+    ~200-400 ms decision is pure latency. Every branch below fires only when the
+    operation is genuinely offered AND, for a tap, exactly one control matches —
+    the same closed-set rule the model is held to, so nothing the model could
+    refuse is executed here.
+
+    Callers apply this on the FIRST step only: a goal like "go back" still matches
+    after the action, so re-deciding it every step would loop until max_steps.
+    """
+    operations = observation.operations()
+    goal_text = _normalize(goal)
+
+    if "go_back" in operations and _BACK_GOAL.match(goal_text):
+        return Decision(kind="go_back", confidence=1.0, source="deterministic")
+    if "go_home" in operations and _HOME_GOAL.match(goal_text):
+        return Decision(kind="go_home", confidence=1.0, source="deterministic")
+    if "scroll_down" in operations and _SCROLL_DOWN_GOAL.match(goal_text):
+        return Decision(kind="scroll_down", confidence=1.0, source="deterministic")
+    if "scroll_up" in operations and _SCROLL_UP_GOAL.match(goal_text):
+        return Decision(kind="scroll_up", confidence=1.0, source="deterministic")
+
+    # A goal that is nothing but a URL (once the verb and the URL itself are
+    # removed) can only mean one thing. A compound goal keeps its URL and is left
+    # to Jev.
+    url = getattr(observation, "navigate_url", None)
+    if "navigate" in operations and url:
+        remainder = _LEADING_VERB.sub("", goal_text)
+        for form in {url.lower(), _normalize(url), re.sub(r"^https?://", "", url.lower())}:
+            remainder = remainder.replace(form, " ")
+        if _normalize(remainder) in ("", "the page", "this page"):
+            return Decision(kind="navigate", confidence=1.0, source="deterministic")
+
+    # A single control whose label is exactly the goal (minus its leading verb).
+    if "click_element" in operations:
+        wanted = _normalize(_LEADING_VERB.sub("", goal_text))
+        if wanted:
+            matches = [
+                c
+                for c in observation.targets_for("click_element")
+                if _normalize(c.get("label", "")) == wanted
+            ]
+            if len(matches) == 1:
+                return Decision(
+                    kind="click_element",
+                    element_id=matches[0]["id"],
+                    confidence=1.0,
+                    source="deterministic",
+                )
+    return None
 
 
 def request_state(goal: str, observation: Observation, history: list[str]) -> dict[str, Any]:
@@ -165,7 +245,9 @@ class JevChooser:
       real activation action. Target heads are speculative: they are asked in the
       same round trip as the operation and only the matching one is used, so the
       extra question costs tokens but almost no latency.
-    * ``key``          - which key, when the operation is press_key.
+    * ``key``          - which key, when the operation is press_key. Asked only
+      when press_key is actually offered, which the browser and Android engines
+      never do.
 
     A target Choice is never padded with legal-but-irrelevant elements: Jev's
     confidence measures how concentrated the distribution is, so a bloated
@@ -212,13 +294,19 @@ class JevChooser:
                 ),
                 criteria=operations,
             ),
-            "key": Choice(
+        }
+
+        # `key` is asked ONLY when press_key is on the table. The browser and
+        # Android engines never offer press_key, so asking it unconditionally put a
+        # dead question and a six-option criteria set on every decision they made —
+        # paid in payload and inference work, with no way for the answer to matter.
+        if "press_key" in operations:
+            questions["key"] = Choice(
                 instructions=(
                     "If operation is press_key, which key should be sent? Otherwise choose return."
                 ),
                 criteria=KEYS,
-            ),
-        }
+            )
 
         # Speculative target heads: one per operation that takes a target, each
         # containing ONLY elements legal for that operation. Asked in the same round
@@ -248,7 +336,7 @@ class JevChooser:
         self.last_model_reported = getattr(response, "model", None)
 
         operation_answer = answers["operation"]
-        key_answer = answers["key"]
+        key_answer = answers.get("key") if hasattr(answers, "get") else None
         operation = operation_answer.choice
 
         # Operation -> the head that carries its target, if any.
@@ -274,14 +362,14 @@ class JevChooser:
         confidences = [float(operation_answer.confidence)]
         if target_answer is not None:
             confidences.append(float(target_answer.confidence))
-        elif operation == "press_key":
+        elif operation == "press_key" and key_answer is not None:
             confidences.append(float(key_answer.confidence))
         confidence = min(confidences)
 
         return Decision(
             kind=operation,
             element_id=element_id,
-            key=key_answer.choice,
+            key=key_answer.choice if key_answer is not None else None,
             confidence=confidence,
             source=f"jev:{self.last_model_reported or self.model}",
             raw={

@@ -9,6 +9,7 @@ in, because that is the normal state of CI.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -463,6 +464,7 @@ def test_the_settle_poll_never_takes_a_full_snapshot(monkeypatch: pytest.MonkeyP
     )
     monkeypatch.setattr(android, "tap", lambda *a, **k: None)
     monkeypatch.setattr(android, "foreground", lambda *a, **k: "app/.Main")
+    monkeypatch.setattr(android, "focus_signature", lambda *a, **k: "app/.Main|win")
 
     class Chooser:
         def choose(self, *_a: Any) -> Decision:
@@ -471,6 +473,33 @@ def test_the_settle_poll_never_takes_a_full_snapshot(monkeypatch: pytest.MonkeyP
     # settle=0.5 means the poll spins several times; none of them may dump.
     android.run("S", "g", Chooser(), act=True, max_steps=3, settle=0.5)
     assert len(snapshots) == 3, "exactly one snapshot per step, none from the poll"
+
+
+def test_focus_signature_reads_app_and_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    """One `dumpsys window` yields both the app and the focused window, so an
+    in-app change (a dialog, a tab) is visible for the same ~52 ms cost."""
+    text = (
+        "mFocusedApp=ActivityRecord{abc u0 com.example.app/.Main t42}\n"
+        "mCurrentFocus=Window{9f8e7d u0 com.example.app/com.example.app.Main}\n"
+    )
+    monkeypatch.setattr(android, "shell", lambda *a, **k: text)
+    assert android.focus_signature("S") == "com.example.app/.Main|com.example.app/com.example.app.Main"
+
+
+def test_focus_signature_only_moves_with_the_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Honest about the limit. A new focused window (a dialog) is visible, but a
+    tab or fragment swap inside one activity keeps the same window and is NOT —
+    that case is guarded at replay time by description resolution, not here."""
+    same_app = "mFocusedApp=ActivityRecord{abc u0 com.example.app/.Main t42}"
+    same_window = same_app + "\nmCurrentFocus=Window{1 u0 com.example.app.Main}"
+    dialog = same_app + "\nmCurrentFocus=Window{2 u0 com.example.app.Dialog}"
+
+    monkeypatch.setattr(android, "shell", lambda *a, **k: same_window)
+    assert android.focus_signature("S") == "com.example.app/.Main|com.example.app.Main"
+    monkeypatch.setattr(android, "shell", lambda *a, **k: dialog)
+    assert android.focus_signature("S") != "com.example.app/.Main|com.example.app.Main"
 
 
 def test_android_defaults_are_single_sourced() -> None:
@@ -489,7 +518,195 @@ def test_android_settles_faster_than_the_browser() -> None:
     the foreground never changes and the poll cannot fire — a long settle is dead
     time. The dump blocks on UI idle itself (3.0-3.4 s in a transition vs 2.1 s
     still), so this is a floor guard rather than the settling mechanism."""
-    assert android.DEFAULT_SETTLE < 3.0, "the browser's 3 s is too long here" 
+    assert android.DEFAULT_SETTLE < 3.0, "the browser's 3 s is too long here"
+
+
+def test_a_decomposition_dump_is_reused_as_the_first_observation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The planner's dump WAS thrown away and re-taken — ~2.1 s per decomposed run.
+    It seeds the first step now."""
+    snapshots: list[int] = []
+    monkeypatch.setattr(
+        android, "snapshot", lambda *a, **k: snapshots.append(1) or observation()
+    )
+    monkeypatch.setattr(android, "dump", lambda *a, **k: DUMP)
+    monkeypatch.setattr(android, "foreground", lambda *a, **k: "app/.Main")
+
+    class Writer:
+        available = True
+
+        def decompose(self, goal: str, summary: str) -> list[str]:
+            return [goal]  # one subgoal: the <2 branch that used to double-dump
+
+        def write(self, *a: Any, **k: Any) -> str:
+            return "x"
+
+    class Chooser:
+        def choose(self, *_a: Any) -> Decision:
+            return Decision(kind="done")
+
+    result = android.run("S", "g", Chooser(), act=False, writer=Writer())
+    assert result.outcome == "done"
+    assert len(snapshots) == 1, "the planner's dump must seed the first step"
+
+
+def test_focus_signature_handles_work_profiles(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A work profile is user 10; a hardcoded `u0` read it as no focused window."""
+    text = (
+        "mFocusedApp=ActivityRecord{abc u10 com.example.app/.Main t42}\n"
+        "mCurrentFocus=Window{9f8e7d u10 com.example.app/com.example.app.Main}\n"
+    )
+    monkeypatch.setattr(android, "shell", lambda *a, **k: text)
+    assert android.focus_signature("S") == "com.example.app/.Main|com.example.app/com.example.app.Main"
+
+
+def test_focus_signature_is_unknown_when_adb_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unreadable device must not look like a screen transition."""
+
+    def boom(*_a: Any, **_k: Any) -> str:
+        raise android.AdbError("device offline")
+
+    monkeypatch.setattr(android, "shell", boom)
+    assert android.focus_signature("S") == ""
+    assert android._screen_moved("", "app/.Main") is False, "unavailable is not a move"
+    assert android._screen_moved("app/.Main", "") is False
+    assert android._screen_moved("app/.Main", "app/.Main") is False
+    assert android._screen_moved("app/.Main", "app/Other") is True
+
+
+def test_android_replay_refuses_an_all_targetless_plan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """back/home/scroll/navigate have no target to validate against the screen, so a
+    plan made only of them could run on the wrong screen inside the same activity."""
+    snapshots: list[int] = []
+    monkeypatch.setattr(
+        android, "snapshot", lambda *a, **k: snapshots.append(1) or observation()
+    )
+    monkeypatch.setattr(android, "key", lambda *a, **k: None)
+
+    result = android.replay("S", "g", [{"kind": "go_back", "target": ""}], act=True, settle=0.1)
+    assert result.outcome == "replay_miss"
+    assert snapshots == [], "it must refuse before dumping the hierarchy"
+
+
+def test_android_replay_refuses_a_plan_that_starts_targetless(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`go_back -> click "Settings"` would go back on the wrong screen before
+    "Settings" was ever resolved, so the FIRST action must be a described target."""
+    monkeypatch.setattr(
+        android, "snapshot", lambda *a, **k: pytest.fail("must refuse before dumping")
+    )
+    plan = [
+        {"kind": "go_back", "target": ""},
+        {"kind": "click_element", "target": "Settings"},
+    ]
+    result = android.replay("S", "g", plan, act=True, settle=0.1)
+    assert result.outcome == "replay_miss"
+
+
+def test_focus_signature_is_unknown_when_the_dump_is_unrecognised(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A parsed-but-unrecognised dump must not yield the truthy key "|"."""
+    monkeypatch.setattr(android, "shell", lambda *a, **k: "nothing about windows here")
+    assert android.focus_signature("S") == ""
+
+
+def test_android_replay_refuses_an_ambiguous_description(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    page = observation()
+    wanted = page.candidates[0]["description"]
+    page._candidates.append(dict(page._candidates[0], id="999"))
+    monkeypatch.setattr(android, "snapshot", lambda *a, **k: page)
+    monkeypatch.setattr(android, "tap", lambda *a, **k: None)
+
+    result = android.replay(
+        "S", "g", [{"kind": "click_element", "target": wanted}], act=True, settle=0.1
+    )
+    assert result.outcome == "replay_miss"
+    assert "2 elements match" in result.steps[0].note
+
+
+def test_android_cache_key_uses_the_window_signature(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The key includes the window signature, not just the foreground app."""
+    from jev_use.cache import PlanCache
+
+    page = observation()
+    clickable = next(c for c in page.candidates if c["clickable"])
+    monkeypatch.setattr(android, "focus_signature", lambda *a, **k: "app/.Main|tabA")
+    monkeypatch.setattr(android, "snapshot", lambda *a, **k: page)
+    monkeypatch.setattr(android, "tap", lambda *a, **k: None)
+
+    cache = PlanCache(tmp_path / "c.json")
+    # The engine keys on f"android|<signature>|{goal}" and PlanCache appends "::{goal}".
+    cache.put(
+        "android|app/.Main|tabA|g", "g",
+        [{"kind": "click_element", "target": clickable["description"]}],
+    )
+    # The old app-only key must not be what gets replayed.
+    cache.put("android|app/.Main|g", "g", [{"kind": "click_element", "target": "nope"}])
+
+    class Chooser:
+        def choose(self, *_a: Any) -> Decision:
+            pytest.fail("a cache hit must not consult the model")
+
+    result = android.run("S", "g", Chooser(), act=True, cache=cache, max_steps=2, settle=0.1)
+    assert result.outcome == "replayed"
+
+
+def test_android_replay_skips_the_final_dump(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A single-action replay used to dump the hierarchy again after acting, with
+    nothing left to read it — ~2.1 s of pure waste."""
+    from jev_use.cache import PlanCache
+
+    page = observation()
+    clickable = next(c for c in page.candidates if c["clickable"])
+    snapshots: list[int] = []
+    monkeypatch.setattr(android, "focus_signature", lambda *a, **k: "app/.Main|tabA")
+    monkeypatch.setattr(android, "snapshot", lambda *a, **k: snapshots.append(1) or page)
+    monkeypatch.setattr(android, "tap", lambda *a, **k: None)
+
+    cache = PlanCache(tmp_path / "c.json")
+    cache.put(
+        "android|app/.Main|tabA|g", "g",
+        [{"kind": "click_element", "target": clickable["description"]}],
+    )
+
+    class Chooser:
+        def choose(self, *_a: Any) -> Decision:
+            pytest.fail("a cache hit must not consult the model")
+
+    result = android.run("S", "g", Chooser(), act=True, cache=cache, max_steps=1, settle=0.1)
+    assert result.outcome == "replayed"
+    assert len(snapshots) == 1, "only the initial dump; the final one is skipped"
+
+
+def test_deterministic_decision_handles_back_and_scroll() -> None:
+    from jev_use.choosers import deterministic_decision
+
+    obs = observation()
+    back = deterministic_decision("go back", obs)
+    assert back is not None and back.kind == "go_back"
+    scroll = deterministic_decision("scroll down", obs)
+    assert scroll is not None and scroll.kind == "scroll_down"
+    assert deterministic_decision("open the settings app", obs) is None
+
+
+def test_deterministic_decision_leaves_compound_goals_to_jev() -> None:
+    """A prefix match would run the first clause and drop the rest."""
+    from jev_use.choosers import deterministic_decision
+
+    obs = observation()
+    for goal in ("go back and open settings", "scroll down then tap Checkout", "go home after saving"):
+        assert deterministic_decision(goal, obs) is None, goal
 
 
 def test_password_is_masked_in_the_description() -> None:

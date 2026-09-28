@@ -38,7 +38,7 @@ from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import quote
 
-from .choosers import Decision, validate
+from .choosers import Decision, deterministic_decision, validate
 
 ADB = "adb"
 DUMP_PATH = "/data/local/tmp/jev_dump.xml"
@@ -356,6 +356,53 @@ def foreground(serial: str) -> str:
         return match.group(1)
     match = re.search(r"mCurrentFocus=Window\{[^}]*\s([\w.]+/[\w.$]+)", text)
     return match.group(1) if match else ""
+
+
+def focus_signature(serial: str) -> str:
+    """A cheap "has the window changed?" signal, from the app and the focus window.
+
+    It comes out of the SAME single `dumpsys window` call `foreground()` already
+    makes (~52 ms measured), so it adds no adb traffic, and it moves for what the
+    app string alone misses: a dialog, a menu or a new surface gets its own focused
+    window.
+
+    **What it does not see.** An ordinary tab, fragment or view swap inside one
+    activity keeps the same task, the same app AND the same focused window, so it is
+    invisible here — the earlier "sees in-app tabs" claim was wrong and the test that
+    pretended otherwise was fabricating a new window. Detecting those cheaply is not
+    possible: it needs the hierarchy, which is a ~2.1 s dump. That case is guarded at
+    replay time instead, by refusing targetless plans and by resolving every stored
+    description against the fresh screen.
+
+    **Unavailable is `""`.** An `adb` failure, or a `dumpsys` we could not parse,
+    returns the empty string, which callers must treat as UNKNOWN — never as a
+    transition or a usable cache key. `_screen_moved` is the only sanctioned
+    comparison for exactly that reason: `"" -> "app/.Main"` is a device that was
+    momentarily unreadable, not a screen that changed. Returning `"|"` for a parsed
+    but unrecognised dump would be worse than empty: it is truthy, so every such
+    screen would share one cache key.
+    """
+    try:
+        text = shell(serial, "dumpsys window")
+    except AdbError:
+        return ""
+    app = re.search(r"mFocusedApp=.*?\s([\w.]+/[\w.$]+)", text)
+    if not app:
+        return ""
+    # `u\d+` not `u0`: a work profile runs as user 10 (and clones as 999), and a
+    # hardcoded u0 read those screens as having no focused window at all.
+    focus = re.search(r"mCurrentFocus=Window\{[0-9a-f]+ u\d+ ([^}]+)\}", text)
+    return f"{app.group(1)}|{focus.group(1) if focus else ''}"
+
+
+def _screen_moved(before: str, now: str) -> bool:
+    """True only when two REAL window signatures differ.
+
+    An empty signature means the device could not be read; treating that as a move
+    would make a momentary adb failure look like the screen had changed and cut a
+    settle short.
+    """
+    return bool(before) and bool(now) and now != before
 
 
 # -- the view hierarchy -----------------------------------------------------
@@ -1175,18 +1222,35 @@ def _run_one(
     min_confidence: float,
     settle: float,
     writer: Any = None,
+    observation: Observation | None = None,
 ) -> Result:
+    """One goal, one Jev loop. No planning here — see run().
+
+    `observation` seeds the first step: `run()` may already hold the dump it read
+    to plan with, and on Android re-taking it is the single most expensive mistake
+    available — a hierarchy dump is ~2.1 s. It is consumed once; every later step
+    re-observes.
+    """
     started = time.perf_counter()
     result = Result(goal=goal)
     history: list[str] = []
     can_write = writer is not None and writer.available
+    pending = observation
 
     for index in range(max_steps):
-        observation = snapshot(serial, goal, can_write=can_write)
+        if pending is not None:
+            observation = pending
+            pending = None
+        else:
+            observation = snapshot(serial, goal, can_write=can_write)
         result.snapshots += 1
         result.foreground = observation.foreground
 
-        decision = validate(chooser.choose(goal, observation, history), observation)
+        # First step, unambiguous goal: decide it in code rather than paying for a
+        # model round trip. Later steps always go to the chooser.
+        fixed = deterministic_decision(goal, observation) if index == 0 else None
+        chosen = fixed if fixed is not None else chooser.choose(goal, observation, history)
+        decision = validate(chosen, observation)
         if not decision.accepted:
             result.steps.append(
                 Step(index, decision, observation, False, f"refused: {decision.rejection}")
@@ -1233,20 +1297,25 @@ def _run_one(
 
         note = f"{decision.kind} {label}".strip()
         if act:
-            before = observation.foreground
+            # Only a state-changing action is settled; type/scroll/wait are not, so the
+            # baseline is captured only when the poll will actually use it.
+            settles = decision.kind in ("click_element", "go_back", "go_home", "navigate")
+            before = focus_signature(serial) if settles else ""
             if decision.kind == "type_text" and text is not None:
                 type_into(serial, text)
             else:
                 execute(serial, decision, observation)
-            if decision.kind in ("click_element", "go_back", "go_home", "navigate"):
+            if settles:
                 # Poll a ~50 ms signal, never a full snapshot. This loop only ever
-                # asked one question — "has the foreground app changed?" — and
-                # answering it with `snapshot()` cost ~2.9 s a go. Measured, that
-                # was most of a step's entire budget spent re-serialising a whole
-                # hierarchy in order to read one string off it.
+                # asked one question — "has the screen changed?" — and answering it
+                # with `snapshot()` cost ~2.9 s a go, most of a step's budget spent
+                # re-serialising a whole hierarchy to read one string off it. The
+                # window signature is that same cheap `dumpsys window`, and it moves
+                # for a dialog or a new surface that the foreground app alone misses.
+                # An unreadable device (`""`) is not a move — see `_screen_moved`.
                 deadline = time.perf_counter() + settle
                 while time.perf_counter() < deadline:
-                    if foreground(serial) != before:
+                    if _screen_moved(before, focus_signature(serial)):
                         break
                     time.sleep(0.25)
             note = f"acted: {note}"
@@ -1280,18 +1349,33 @@ def run(
     ordered subgoals before the loop starts.
     """
     started = time.perf_counter()
-    # Namespaced, because the browser engine shares this cache file and its keys
-    # start with a URL. A package/activity name must never be able to collide
-    # with one.
-    start_key = f"android|{foreground(serial)}"
 
     if cache is not None:
-        stored = cache.get(f"{start_key}|{goal}", goal)
-        if stored:
-            replayed = replay(serial, goal, stored, act=act, settle=settle, writer=writer)
-            if replayed.outcome == "replayed":
-                return replayed
-            cache.drop(f"{start_key}|{goal}", goal)
+        # Namespaced, because the browser engine shares this cache file and its keys
+        # start with a URL. A package/activity name must never be able to collide
+        # with one.
+        #
+        # The key carries the window signature, not just the foreground app, at the
+        # same single `dumpsys window` cost (~52 ms): a dialog or a new surface
+        # changes the focused window where the app string does not, so this avoids
+        # some — not all — false lookups. An ordinary tab or fragment inside one
+        # activity keeps the same window and is NOT distinguished (see
+        # focus_signature); those are caught at replay time by description
+        # resolution. Computed only when caching is on, so a plain run pays nothing.
+        signature = focus_signature(serial)
+        if not signature:
+            # The screen cannot be identified, so there is no safe key. Sharing one
+            # "unknown" key across every unreadable screen would replay the wrong
+            # plan, so caching is skipped for this run entirely.
+            cache = None
+        else:
+            start_key = f"android|{signature}"
+            stored = cache.get(f"{start_key}|{goal}", goal)
+            if stored:
+                replayed = replay(serial, goal, stored, act=act, settle=settle, writer=writer)
+                if replayed.outcome == "replayed":
+                    return replayed
+                cache.drop(f"{start_key}|{goal}", goal)
 
     if writer is None or not decompose:
         result = _run_one(
@@ -1302,8 +1386,14 @@ def run(
             cache.put(f"{start_key}|{goal}", goal, plan_from(result))
         return result
 
+    can_write = writer is not None and writer.available
+    # The planner needs the screen's text, and reading it means a full dump. That
+    # dump is also exactly the observation the loop starts from, so it is handed
+    # over rather than re-taken — on Android a second dump is ~2.1 s.
+    summary_observation: Observation | None = None
     try:
-        summary = snapshot(serial, goal, can_write=False).read()
+        summary_observation = snapshot(serial, goal, can_write=can_write)
+        summary = summary_observation.read()
     except AdbError:
         summary = ""
     subgoals = writer.decompose(goal, summary)
@@ -1312,16 +1402,26 @@ def run(
         return _run_one(
             serial, goal, chooser, act=act, max_steps=max_steps,
             min_confidence=min_confidence, settle=settle, writer=writer,
+            observation=summary_observation,
         )
 
     combined = Result(goal=goal)
     remaining = max_steps
+    pending = summary_observation
     for subgoal in subgoals:
         if remaining <= 0:
             break
+        seed = None
+        if pending is not None:
+            # Reuse the summary dump for the first subgoal only, correcting the URL
+            # it was read for: `navigate` is offered only when the current goal
+            # names one, and the subgoal is not the goal the dump was taken for.
+            pending.navigate_url = url_in(subgoal)
+            seed, pending = pending, None
         part = _run_one(
             serial, subgoal, chooser, act=act, max_steps=remaining,
             min_confidence=min_confidence, settle=settle, writer=writer,
+            observation=seed,
         )
         combined.steps.extend(part.steps)
         combined.snapshots += part.snapshots
@@ -1379,6 +1479,18 @@ def replay(
     result = Result(goal=goal)
     can_write = writer is not None and writer.available
 
+    if not plan or not plan[0].get("target"):
+        # The FIRST executable action must be a described target. A targetless first
+        # action (back/home/scroll/navigate) runs before anything has validated the
+        # screen, so on a different screen inside the same activity it would act on
+        # the wrong one — a plan like `go_back -> click "Settings"` would go back on
+        # the wrong screen before "Settings" was ever resolved. A described first
+        # target validates the screen, and every later action is resolved against a
+        # re-dumped screen, so those are safe.
+        result.outcome = "replay_miss"
+        result.seconds = time.perf_counter() - started
+        return result
+
     if observation is None:
         observation = snapshot(serial, goal, can_write=can_write)
     result.snapshots = 1
@@ -1391,23 +1503,53 @@ def replay(
         if kind in ("scroll_down", "scroll_up", "go_back", "go_home", "navigate"):
             decision = Decision(kind=kind, confidence=1.0, source="cache")
         else:
-            found = next(
-                (c for c in observation.candidates if c["description"] == wanted), None
-            )
-            if found is None:
+            # Resolve only within the elements LEGAL for this operation, so a cached
+            # click cannot land on a non-clickable candidate or typing on a non-fillable
+            # one.
+            legal = observation.targets_for(kind)
+            matches = [c for c in legal if c["description"] == wanted]
+            if len(matches) != 1:
+                # Exactly one, or it is not replayable: zero is a target that is gone,
+                # more than one is an ambiguous description, and silently taking the
+                # first could act on the wrong control.
+                reason = (
+                    f"nothing described {wanted!r}"
+                    if not matches
+                    else f"{len(matches)} elements match {wanted!r}"
+                )
                 result.steps.append(
                     Step(index, Decision(kind=kind, source="cache"), observation, False,
-                         f"replay_miss: nothing described {wanted!r}")
+                         f"replay_miss: {reason}")
                 )
                 result.outcome = "replay_miss"
                 result.seconds = time.perf_counter() - started
                 return result
             decision = Decision(
-                kind=kind, element_id=found["id"], confidence=1.0, source="cache"
+                kind=kind, element_id=matches[0]["id"], confidence=1.0, source="cache"
             )
+
+        # A cached action passes the same gate a live one does.
+        decision = validate(decision, observation)
+        if not decision.accepted:
+            result.steps.append(
+                Step(index, decision, observation, False, f"replay_miss: {decision.rejection}")
+            )
+            result.outcome = "replay_miss"
+            result.seconds = time.perf_counter() - started
+            return result
 
         note = f"cache: {kind} {wanted or ''}".strip()
         if act:
+            has_next = index < len(plan) - 1
+            # A state-changing action is settled even when it is LAST, so a final tap
+            # does not return `replayed` while the transition is still underway. Only
+            # the ~2.1 s re-dump is skipped when nothing later reads it.
+            settles = kind in ("click_element", "navigate", "go_back", "go_home")
+            # Baseline BEFORE acting. Captured afterwards it compares the new screen
+            # with itself, so the poll never fires and every replay waits out the full
+            # settle even when the screen changed at once. `""` (unreadable) is not a
+            # move, so `_screen_moved` governs the comparison.
+            settled = focus_signature(serial) if settles else ""
             if kind == "type_text":
                 if writer is None:
                     result.outcome = "replay_miss"
@@ -1419,20 +1561,26 @@ def replay(
                 type_into(serial, text)
             else:
                 execute(serial, decision, observation)
-            # Settle on the cheap signal first, then take ONE snapshot and carry
-            # it into the next step. Replaying used to dump the hierarchy
-            # immediately after acting, which could catch a half-drawn transition
-            # and hand the next step a screen that no longer existed.
-            if kind in ("click_element", "navigate"):
-                settled = observation.foreground
+            # Settle on the cheap signal first, then take ONE snapshot and carry it
+            # into the next step. Replaying used to dump the hierarchy immediately
+            # after acting, which could catch a half-drawn transition and hand the
+            # next step a screen that no longer existed. go_back/go_home are settled
+            # too — they change the screen just as a tap does.
+            if settles:
                 deadline = time.perf_counter() + settle
                 while time.perf_counter() < deadline:
-                    if foreground(serial) != settled:
+                    current = focus_signature(serial)
+                    if _screen_moved(settled, current):
+                        # Keep the report honest without paying for a dump.
+                        result.foreground = current.split("|", 1)[0] or result.foreground
                         break
                     time.sleep(0.25)
-            observation = snapshot(serial, goal, can_write=can_write)
-            result.snapshots += 1
-            result.foreground = observation.foreground
+            # Only re-dump if a LATER entry still has to resolve against the screen.
+            # A dump after the final action is ~2.1 s that nothing reads.
+            if has_next:
+                observation = snapshot(serial, goal, can_write=can_write)
+                result.snapshots += 1
+                result.foreground = observation.foreground
             note = f"cache: acted {kind} {wanted}".strip()
 
         result.steps.append(Step(index, decision, observation, act, note))

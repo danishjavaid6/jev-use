@@ -8,6 +8,7 @@ product surface can change independently.
 from __future__ import annotations
 
 import os
+from typing import Any
 
 import pytest
 
@@ -132,6 +133,48 @@ def test_initialize_advertises_prompts() -> None:
 def test_handlers_cover_every_declared_tool() -> None:
     declared = {t["name"] for t in mcp_server.TOOLS}
     assert declared == set(mcp_server.HANDLERS)
+
+
+# -- driver sessions --------------------------------------------------------
+
+
+def test_a_healthy_driver_session_is_reused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """browser_use -> browser_read -> browser_extract must not each spawn a driver."""
+    created: list[Any] = []
+
+    class FakeDriver:
+        def __init__(self) -> None:
+            self._alive = True
+            created.append(self)
+
+        @property
+        def alive(self) -> bool:
+            return self._alive
+
+        def start(self) -> None:
+            pass
+
+        def close(self) -> None:
+            self._alive = False
+
+    monkeypatch.setattr(mcp_server, "Driver", FakeDriver)
+    monkeypatch.setattr(mcp_server, "attach_helpfully", lambda driver, profile=None: ("t", profile))
+    mcp_server.reset_browser_session()
+    try:
+        first, _ = mcp_server._browser_session(None)
+        second, _ = mcp_server._browser_session(None)
+        assert first is second, "a healthy session must be reused"
+        assert len(created) == 1
+
+        first.close()
+        third, _ = mcp_server._browser_session(None)
+        assert third is not first and len(created) == 2, "a dead child must be replaced"
+
+        work, _ = mcp_server._browser_session("work")
+        home, _ = mcp_server._browser_session("home")
+        assert work is not home, "a different profile needs a different attach"
+    finally:
+        mcp_server.reset_browser_session()
 
 
 def test_load_env_does_not_clobber_an_existing_value(

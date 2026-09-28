@@ -38,16 +38,18 @@ Speaks MCP over stdio. Nothing but JSON-RPC goes to stdout.
 
 from __future__ import annotations
 
+import atexit
 import json
 import os
 import sys
-import time
+import threading
 import traceback
 from pathlib import Path
 from typing import Any
 
 from .browser import DEFAULT_PROFILE, attach, read as browser_read, run as browser_run
 from .browser import running_profiles, cdp_alive
+from .browser import navigate_and_settle
 from .choosers import JevChooser
 from .cache import PlanCache
 from .driver import Driver, DriverError
@@ -99,6 +101,82 @@ def load_env() -> None:
 def attach_helpfully(driver: Driver, profile: str | None = None) -> Any:
     """Attach to the requested profile (default: the real one), or explain the fix."""
     return attach(driver, profile=profile)
+
+
+# -- driver sessions --------------------------------------------------------
+#
+# Each browser_* call used to spawn its own `cua-driver mcp`, then re-run
+# discovery (`ps`, up to two `/json/version` probes) and a `list_windows` bind —
+# and tear all of it down again. A harness that follows browser_use with
+# browser_read and browser_extract pays that three times for one page.
+#
+# This keeps one driver + Target alive and reuses it while it is healthy, and
+# resets it only when the child process is gone, the requested profile changed, or
+# a call fails. The process is still ours alone, so the unrestricted permission
+# mode it runs under stays contained to a server nothing else can reach.
+
+_SESSION_LOCK = threading.Lock()
+_SESSION: dict[str, Any] = {"driver": None, "target": None, "profile": None}
+
+
+def _close_session_locked() -> None:
+    """Close the cached driver. Caller must hold `_SESSION_LOCK`."""
+    driver = _SESSION["driver"]
+    _SESSION.update(driver=None, target=None, profile=None)
+    if driver is not None:
+        try:
+            driver.close()
+        except Exception:
+            pass
+
+
+def reset_browser_session() -> None:
+    """Drop the cached session so the next call starts a fresh driver."""
+    with _SESSION_LOCK:
+        _close_session_locked()
+
+
+def _browser_session(profile: str | None) -> tuple[Driver, Any]:
+    """A live `(driver, target)` for `profile`, reusing the cached one when valid."""
+    key = profile or ""
+    with _SESSION_LOCK:
+        driver = _SESSION["driver"]
+        if (
+            driver is not None
+            and getattr(driver, "alive", False)
+            and _SESSION["profile"] == key
+            and _SESSION["target"] is not None
+        ):
+            return driver, _SESSION["target"]
+
+        _close_session_locked()
+        driver = Driver()
+        driver.start()
+        try:
+            target = attach_helpfully(driver, profile)
+        except Exception:
+            driver.close()
+            raise
+        _SESSION.update(driver=driver, target=target, profile=key)
+        return driver, target
+
+
+def with_browser_session(profile: str | None, body: Any) -> tuple[Any, Any]:
+    """Run `body(driver, target)` on a reused session.
+
+    On a DriverError the session is dropped so the next call is fresh, but the
+    error is re-raised rather than retried: re-running the body could repeat a
+    partial action.
+    """
+    driver, target = _browser_session(profile)
+    try:
+        return body(driver, target), target
+    except DriverError:
+        reset_browser_session()
+        raise
+
+
+atexit.register(reset_browser_session)
 
 
 def render(result: Any) -> str:
@@ -598,24 +676,15 @@ def tool_browser_use(args: dict[str, Any]) -> str:
     goal = args["goal"]
     act = bool(args.get("act", False))
 
-    driver = Driver()
-    driver.start()
-    try:
-        target = attach_helpfully(driver, args.get("profile"))
+    def body(driver: Driver, target: Any) -> Any:
         if args.get("url"):
-            driver.call(
-                "page",
-                target.args(
-                    action="execute_javascript",
-                    javascript=f"location.href={json.dumps(args['url'])};",
-                ),
+            # Points the page at the URL and waits for it to actually arrive. The
+            # baseline is read from the live page, not the target's cached URL.
+            navigate_and_settle(
+                driver, target, args["url"], float(args.get("settle", DEFAULT_SETTLE))
             )
-            deadline = time.perf_counter() + float(args.get("settle", DEFAULT_SETTLE))
-            while time.perf_counter() < deadline:
-                time.sleep(0.3)
-                break
 
-        result = browser_run(
+        return browser_run(
             driver,
             target,
             goal,
@@ -628,9 +697,8 @@ def tool_browser_use(args: dict[str, Any]) -> str:
             decompose=bool(args.get("decompose", True)),
             cache=PlanCache(CACHE_PATH) if args.get("use_cache", True) else None,
         )
-    finally:
-        driver.close()
 
+    result, target = with_browser_session(args.get("profile"), body)
     return f"port={target.port} pid={target.pid}\n" + render(result)
 
 
@@ -639,15 +707,12 @@ def tool_browser_extract(args: dict[str, Any]) -> str:
     text = args.get("text")
 
     if text is None:
-        driver = Driver()
-        driver.start()
         try:
-            target = attach_helpfully(driver, args.get("profile"))
-            text = browser_read(driver, target)
+            text, _ = with_browser_session(
+                args.get("profile"), lambda driver, target: browser_read(driver, target)
+            )
         except DriverError as exc:
             return str(exc)
-        finally:
-            driver.close()
 
     try:
         result = extract_ask(text or "", questions)
@@ -674,13 +739,9 @@ def tool_browser_extract(args: dict[str, Any]) -> str:
 
 
 def tool_browser_read(args: dict[str, Any]) -> str:
-    driver = Driver()
-    driver.start()
-    try:
-        target = attach_helpfully(driver, args.get("profile"))
-        text = browser_read(driver, target)
-    finally:
-        driver.close()
+    text, target = with_browser_session(
+        args.get("profile"), lambda driver, target: browser_read(driver, target)
+    )
     if not text:
         return "(the page returned no visible text)"
     return f"url={target.url}\n\n{text[:20000]}"

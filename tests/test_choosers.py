@@ -127,6 +127,74 @@ def test_click_element_withholds_click_target_when_nothing_is_activatable() -> N
     assert "operation" in client.questions
 
 
+def test_key_is_not_asked_when_press_key_is_unavailable() -> None:
+    """The browser and Android engines never offer press_key, so the `key`
+    question and its six-option criteria set were dead weight on every decision."""
+    from jev_use import browser
+
+    obs = browser.Observation(
+        browser.Target(port=1, pid=2, window_id=3),
+        {"url": "u", "elements": [{"ref": 0, "tag": "a", "text": "Home"}]},
+    )
+    client = FakeClient(
+        {
+            "operation": FakeAnswer("click_element", 0.9),
+            "click_target": FakeAnswer("0", 0.9),
+        }
+    )
+    decision = JevChooser(client=client).choose("open home", obs, [])
+    assert "key" not in client.questions, "no press_key means no key question"
+    assert "operation" in client.questions
+    assert decision.kind == "click_element"
+
+
+def _browser_observation(elements: list[dict]) -> object:
+    from jev_use import browser
+
+    return browser.Observation(
+        browser.Target(port=1, pid=2, window_id=3), {"url": "u", "elements": elements}
+    )
+
+
+def test_deterministic_decision_takes_a_uniquely_named_control() -> None:
+    from jev_use.choosers import deterministic_decision
+
+    obs = _browser_observation(
+        [
+            {"ref": 0, "tag": "a", "text": "Learn more"},
+            {"ref": 1, "tag": "input", "text": "Search", "fillable": True},
+        ]
+    )
+    fixed = deterministic_decision("click Learn more", obs)
+    assert fixed is not None and fixed.kind == "click_element"
+    assert fixed.element_id == "0"
+    assert fixed.source == "deterministic"
+    assert deterministic_decision("make the page nicer", obs) is None
+
+
+def test_deterministic_decision_ignores_an_ambiguous_label() -> None:
+    """Two identical labels are a real choice; the model must make it."""
+    from jev_use.choosers import deterministic_decision
+
+    obs = _browser_observation(
+        [
+            {"ref": 0, "tag": "a", "text": "Sign in"},
+            {"ref": 1, "tag": "a", "text": "Sign in"},
+        ]
+    )
+    assert deterministic_decision("click Sign in", obs) is None
+
+
+def test_deterministic_decision_opts_into_an_explicit_url() -> None:
+    from jev_use.choosers import deterministic_decision
+
+    obs = _browser_observation([])
+    obs.navigate_url = "https://example.com"
+    fixed = deterministic_decision("go to example.com", obs)
+    assert fixed is not None and fixed.kind == "navigate"
+    assert deterministic_decision("search for cats on example.com", obs) is None
+
+
 def test_state_carries_goal_journal_and_current_display(observation: Observation) -> None:
     """The two fields that make one-action-at-a-time decisions work."""
     client = FakeClient(
