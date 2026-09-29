@@ -24,7 +24,69 @@ against the snapshot it came from before anything is dispatched.
 
 ## Setup
 
-Works on Linux, macOS and Windows. Two steps, once — plus the driver.
+Works on Linux, macOS and Windows.
+
+**One command.** `install.sh` / `install.ps1` do everything below — the npm
+install, the runtime, the driver, the MCP registration and both skills — then ask
+for your Jev key and report what is left:
+
+```bash
+# Linux / macOS
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/hamzajavaid2005/jev-use/main/install.sh)"
+```
+
+```powershell
+# Windows (PowerShell)
+iex (irm https://raw.githubusercontent.com/hamzajavaid2005/jev-use/main/install.ps1)
+```
+
+`bash -c "$(curl ...)"` rather than `curl | bash` on purpose: piping into bash
+makes stdin the script, so the key prompt could not read the terminal.
+
+Supply the key up front with `--key=<key>` instead of being prompted (Windows:
+`install.ps1 -Key <key>`), or export `TYPESAFE_API_KEY` first. It is
+idempotent — running it again repairs rather than reinstalls. Both scripts are
+short enough to read before you run them.
+
+**Private repo: the one-liners above do not work, and adding collaborators does
+not change that.** `raw.githubusercontent.com` is fetched without credentials, so
+it answers 404 for a private repo — to a collaborator, and to you. Access has to
+come from an authenticated client on that machine:
+
+```bash
+gh auth login                       # once; this also wires up git's credential helper
+
+bash -c "$(gh api repos/hamzajavaid2005/jev-use/contents/install.sh \
+  -H 'Accept: application/vnd.github.raw')"
+```
+
+Or do what that script does when the archive URL 404s — pack over git, which is
+the step that can use those credentials, and install the tarball it produces:
+
+```bash
+npm pack git+https://github.com/hamzajavaid2005/jev-use.git
+npm install -g ./jev-use-*.tgz
+jev-use install --key=<key>
+```
+
+**Do not use `npm install -g git+https://…` directly.** On npm 10 — what ships
+with Node 22 — that symlinks the package to a clone inside npm's own cache
+directory, so `postinstall` cannot find `bin/jev-use.js` and the install stops
+with `MODULE_NOT_FOUND`. And when it does get far enough, it is worse than
+loud: the lifecycle scripts run *inside that clone*, so the path it registers is
+the one npm deletes. Measured on a real machine — all four harness configs held
+`~/.npm/_cacache/tmp/git-cloneXXXX/bin/jev-use-mcp.js`, already deleted, and the
+only symptom was a harness with no tools and nothing saying why. `install.sh`
+packs first for exactly this reason, and the installer now refuses to register
+from a temporary path at all.
+
+**To let anyone install it, the repo has to stop being private.** Collaborator
+access means an explicit invite and a login per person, which is not
+distribution. Make the repo public, or publish under a name you own and pass
+`--npm=<name>` — plain `jev-use` on the public registry belongs to someone
+else's package.
+
+**Or by hand.** Two steps, once — plus the driver.
 
 **Linux / macOS**
 
@@ -529,6 +591,7 @@ jev_use/driver.py      cua-driver MCP stdio client + the env contract
 jev_use/mcp_server.py  the MCP surface, browser and Android
 jev_use/profiles.py    profile registry, copy-and-launch, and the CLI
 jev_use/text_model.py  the planner and writer Jev structurally cannot be
+install.sh, install.ps1  the one-command bootstrap (curl|bash, irm|iex)
 bin/, lib/             the npm installer
 scripts/enable-cdp.sh  thin wrapper over profiles.py (--list / --open NAME)
 skills/browser-use/    the same guidance as an agent skill (/browser-use)

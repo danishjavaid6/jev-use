@@ -242,3 +242,40 @@ test('opencode refuses a jsonc file with comments instead of eating them', () =>
     'the file must be left exactly as it was'
   );
 });
+
+// -- reading a registration back --------------------------------------------
+//
+// Doctor decides whether a device is healthy from this, so it has to describe
+// what will actually be spawned — the path included, since that is the part that
+// goes stale when node moves or npm deletes its cache.
+
+test('commandcode reads its own entry back, command and args', () => {
+  fs.mkdirSync(path.join(home, '.commandcode'), { recursive: true });
+  commandcode.register(ENTRY);
+  assert.deepEqual(commandcode.registered(), ENTRY);
+});
+
+test('codex reads its block back, including the args array', () => {
+  fs.mkdirSync(path.join(home, '.codex'), { recursive: true });
+  codex.register(ENTRY);
+  assert.deepEqual(codex.registered(), ENTRY);
+});
+
+test('opencode reads its single-array command back', () => {
+  fs.mkdirSync(path.join(home, '.config', 'opencode'), { recursive: true });
+  opencode.register(ENTRY);
+  assert.deepEqual(opencode.registered(), ENTRY);
+});
+
+test('a harness with no entry of ours reports nothing', () => {
+  assert.equal(cursor.registered(), null, 'no config file at all');
+
+  fs.mkdirSync(path.join(home, '.codex'), { recursive: true });
+  write(path.join(home, '.codex', 'config.toml'), 'model = "x"\n');
+  assert.equal(codex.registered(), null, 'a config that holds no block of ours');
+});
+
+test('an unparseable config reads as unregistered, not as a crash', () => {
+  write(path.join(home, '.cursor', 'mcp.json'), '{ this is not json');
+  assert.equal(cursor.registered(), null, 'doctor must not throw over someone else\'s file');
+});
