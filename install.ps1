@@ -45,6 +45,10 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+#: Set when npm's global directory is not writable and we fall back to a
+#: user-owned prefix; the CLI is then looked up here first.
+$script:UsedPrefix = ''
+
 function Write-Say  { param([string]$Message) Write-Host $Message }
 function Write-Step { param([string]$Message) Write-Host "> $Message" -ForegroundColor DarkGray }
 function Write-Ok   { param([string]$Message) Write-Host "OK $Message" -ForegroundColor Green }
@@ -102,18 +106,46 @@ function Get-GitSpec {
 # Run one `npm install -g`, with the key exported for the postinstall that saves
 # it. Returns whether npm succeeded.
 function Invoke-NpmInstall {
-  param([string]$Spec)
+  param([string]$Spec, [string]$Prefix = '')
 
   $previous = $env:TYPESAFE_API_KEY
   if ($Key) { $env:TYPESAFE_API_KEY = $Key }
 
-  & npm install -g --no-fund --no-audit $Spec
+  $npmArgs = @('install', '-g', '--no-fund', '--no-audit')
+  if ($Prefix) { $npmArgs += @('--prefix', $Prefix) }
+  $npmArgs += $Spec
+  & npm @npmArgs
   $code = $LASTEXITCODE
 
   if ($null -eq $previous) { Remove-Item Env:TYPESAFE_API_KEY -ErrorAction SilentlyContinue }
   else { $env:TYPESAFE_API_KEY = $previous }
 
   return ($code -eq 0)
+}
+
+# Where npm may install: its global directory when it is writable, otherwise a
+# user-owned prefix. A machine-wide Node often leaves the global directory
+# needing an elevated shell, and probing for that here keeps the install to one
+# command instead of sending the user off to fix npm first. Empty output means
+# "the default global directory".
+function Get-InstallTarget {
+  $prefix = ''
+  try { $prefix = (npm prefix -g 2>$null | Select-Object -First 1) } catch { $prefix = '' }
+  if ($prefix) {
+    $modules = Join-Path $prefix 'node_modules'
+    try {
+      New-Item -ItemType Directory -Force -Path $modules -ErrorAction Stop | Out-Null
+      # A write probe is the only portable answer: there is no `-w` test on
+      # Windows, and the ACL that blocks a normal install blocks a probe too.
+      $probe = Join-Path $modules ('jev-use-write-test-' + [System.Guid]::NewGuid().ToString('N'))
+      New-Item -ItemType Directory -Force -Path $probe -ErrorAction Stop | Out-Null
+      Remove-Item -Recurse -Force $probe -ErrorAction SilentlyContinue
+      return ''
+    } catch {
+      # fall through to the user prefix
+    }
+  }
+  return (Join-Path $env:USERPROFILE '.local\share\jev-use\npm')
 }
 
 # Clone the repo into a tarball, and hand npm the tarball.
@@ -145,10 +177,19 @@ function Remove-PackDir {
 }
 
 function Install-Package {
+  # Fall back to a user-owned prefix when the global directory needs an elevated
+  # shell, so a locked-down machine still installs in one command.
+  $target = Get-InstallTarget
+  if ($target) {
+    Write-Warn "npm's global directory is not writable; installing into $target instead"
+    New-Item -ItemType Directory -Force -Path $target | Out-Null
+    $script:UsedPrefix = $target
+  }
+
   # A published package is a single source, and the only one worth trying.
   if ($Npm) {
     Write-Step "installing $Npm"
-    if (-not (Invoke-NpmInstall $Npm)) { Fail "could not install $Npm (see the npm output above)." }
+    if (-not (Invoke-NpmInstall -Spec $Npm -Prefix $target)) { Fail "could not install $Npm (see the npm output above)." }
     Write-Ok 'package installed'
     return
   }
@@ -156,7 +197,7 @@ function Install-Package {
   # The archive tarball is a plain remote fetch — no git, no credentials — and
   # npm copies it into place.
   Write-Step "installing $(Get-PackageSpec)"
-  if (Invoke-NpmInstall (Get-PackageSpec)) {
+  if (Invoke-NpmInstall -Spec (Get-PackageSpec) -Prefix $target) {
     Write-Ok 'package installed'
     return
   }
@@ -175,20 +216,27 @@ function Install-Package {
   }
 
   Write-Step "installing $tarball"
-  $installed = Invoke-NpmInstall $tarball
+  $installed = Invoke-NpmInstall -Spec $tarball -Prefix $target
   Remove-PackDir -Dir $dir
   if (-not $installed) { Fail "could not install $tarball (see the npm output above)." }
   Write-Ok 'package installed'
 }
 
-# The CLI's location, without assuming the global bin directory is on PATH.
+# The CLI's location, without assuming the global bin directory is on PATH —
+# and without assuming it is the *default* global directory, since the fallback
+# above may have put it somewhere else.
 function Get-CliPath {
   $command = Get-Command jev-use -ErrorAction SilentlyContinue
   if ($command) { return $command.Source }
 
-  $prefix = ''
-  try { $prefix = (npm prefix -g 2>$null | Select-Object -First 1) } catch { $prefix = '' }
-  if ($prefix) {
+  $prefixes = @()
+  if ($script:UsedPrefix) { $prefixes += $script:UsedPrefix }
+  try {
+    $global = (npm prefix -g 2>$null | Select-Object -First 1)
+    if ($global) { $prefixes += $global }
+  } catch { }
+
+  foreach ($prefix in $prefixes) {
     foreach ($name in 'jev-use.cmd', 'jev-use.ps1', 'jev-use') {
       $candidate = Join-Path $prefix $name
       if (Test-Path $candidate) { return $candidate }
@@ -230,8 +278,9 @@ function Show-NextSteps {
 
   if (-not (Get-Command jev-use -ErrorAction SilentlyContinue)) {
     Write-Warn 'jev-use is not on your PATH. The harness is unaffected (it stores an'
-    Write-Say  '    absolute path), but to use the CLI yourself add the npm global'
-    Write-Say  '    directory to PATH, or reopen your terminal.'
+    Write-Say  '    absolute path), but to use the CLI yourself add this to PATH:'
+    $where = if ($script:UsedPrefix) { $script:UsedPrefix } else { 'the npm global directory' }
+    Write-Say  "      $where"
   }
 }
 

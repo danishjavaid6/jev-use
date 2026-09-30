@@ -10,6 +10,7 @@
  */
 
 const installer = require('../lib/installer');
+const harnesses = require('../lib/harnesses');
 const log = require('../lib/log');
 const paths = require('../lib/paths');
 const runtime = require('../lib/runtime');
@@ -18,9 +19,15 @@ const { run } = require('../lib/run');
 const USAGE = `jev-use — browser use where Jev makes the decisions
 
 Usage
-  jev-use install [--key=<key>] [--auto] [--force]
+  jev-use install [--key=<key>] [--auto] [--force] [--harness=<id,...>]
         Provision the runtime, install cua-driver, and register the MCP server
         and the /browser-use and /mobile-use skills with every harness it finds.
+        --harness restricts registration to the named ids (see \`jev-use harnesses\`).
+
+  jev-use harnesses [--print]
+        List the harnesses this knows how to register with, whether each was
+        detected, and where its config lives. --print shows the MCP block any
+        other harness can use.
 
   jev-use doctor
         Report what is and is not working, and why.
@@ -33,12 +40,15 @@ Usage
         which is the one-time step that makes browser_use possible.
 
 Options
-  --key=<key>    The Jev/Typesafe API key. Also read from --jev-key on
-                 npm install, or the TYPESAFE_API_KEY environment variable.
+  --key=<key>        The Jev/Typesafe API key. Also read from --jev-key on
+                     npm install, or the TYPESAFE_API_KEY environment variable.
+  --harness=<ids>    Comma-separated harness ids to register with. Default: all
+                     detected. Ids come from \`jev-use harnesses\`.
+  --print            Print the MCP block instead of writing anything.
 `;
 
 //: Flags that take a value, so `--key sk-abc` works as well as `--key=sk-abc`.
-const VALUE_FLAGS = new Set(['key', 'jev-key', 'api-key', 'port', 'filter']);
+const VALUE_FLAGS = new Set(['key', 'jev-key', 'api-key', 'port', 'filter', 'harness']);
 
 function parseArgs(argv) {
   const flags = {};
@@ -86,9 +96,27 @@ async function main() {
   switch (command) {
     case 'install': {
       const auto = Boolean(flags.auto);
+      const only = flags.harness
+        ? String(flags.harness)
+            .split(',')
+            .map((value) => value.trim())
+            .filter(Boolean)
+        : null;
+      if (only) {
+        const unknown = only.filter((id) => !harnesses.byId(id));
+        if (unknown.length) {
+          log.fail(`unknown harness: ${unknown.join(', ')} — see \`jev-use harnesses\`.`);
+          return 2;
+        }
+      }
+      if (flags.print) {
+        log.say(harnesses.snippet(installer.entry()));
+        return 0;
+      }
       const summary = await installer.install({
         auto,
         force: Boolean(flags.force),
+        harness: only,
         key: firstString(flags.key, flags['jev-key'], flags['api-key']),
       });
       // Postinstall must not fail `npm install`. An unpickable Python or a
@@ -97,6 +125,30 @@ async function main() {
       // here would abort the user's install and hide that message.
       if (auto) return 0;
       return summary.error ? 1 : 0;
+    }
+
+    case 'harnesses': {
+      if (flags.print) {
+        log.say(harnesses.snippet(installer.entry()));
+        return 0;
+      }
+      const lines = [log.bold('harnesses this can register with')];
+      for (const harness of harnesses.ALL) {
+        let found = false;
+        try {
+          found = harness.detect();
+        } catch {
+          found = false;
+        }
+        lines.push(
+          `  ${harness.id.padEnd(12)} ${harness.name.padEnd(12)} ` +
+            `${(found ? 'detected' : 'not found').padEnd(10)} ${harness.configFile()}`
+        );
+      }
+      log.say(lines.join('\n'));
+      log.say('\nRestrict an install with `--harness=<id,...>`.');
+      log.say('Any other MCP harness: `jev-use harnesses --print`.');
+      return 0;
     }
 
     case 'doctor': {

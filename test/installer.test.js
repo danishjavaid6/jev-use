@@ -182,3 +182,37 @@ test('doctor reports the slash commands, not only the server', async () => {
   const after = await installer.doctor();
   assert.ok(!/skills\s+not installed/.test(after), 'once copied, the skill is reported present');
 });
+
+// -- targeting a harness ----------------------------------------------------
+//
+// `--harness=<id>` is the escape hatch for a machine where detection is wrong —
+// a config directory that has not been created yet, or a harness this build has
+// an adapter for but no evidence of. The flag has to force the write.
+
+test('--harness registers a named harness even when detection did not fire', async () => {
+  const summary = await installer.install({
+    auto: true,
+    key: 'sk-test',
+    harness: ['windsurf'],
+  });
+
+  assert.equal(summary.harnesses.length, 1);
+  assert.equal(summary.harnesses[0].id, 'windsurf');
+  assert.ok(
+    fs.existsSync(path.join(dir, '.codeium', 'windsurf', 'mcp_config.json')),
+    'the named harness is written where it reads'
+  );
+});
+
+test('--harness registers only what it names', async () => {
+  fs.mkdirSync(path.join(dir, '.commandcode'), { recursive: true });
+
+  const summary = await installer.install({ auto: true, key: 'sk-test', harness: ['cursor'] });
+
+  assert.deepEqual(summary.harnesses.map((h) => h.id), ['cursor']);
+  assert.equal(
+    fs.existsSync(path.join(dir, '.commandcode', 'mcp.json')),
+    false,
+    'a detected harness is skipped when the flag names another'
+  );
+});

@@ -102,6 +102,19 @@ need_node() {
   fi
 }
 
+# This script is the POSIX bootstrap; Windows has its own twin. Under Git Bash,
+# MSYS or Cygwin the POSIX tools run against the *Windows* node/npm, so the venv
+# layout, the driver installer and the profile paths all differ. Handing off here
+# beats building a half-working install whose breakage only shows up later.
+guard_windows() {
+  case "$(uname -s 2>/dev/null || echo)" in
+    MINGW*|MSYS*|CYGWIN*)
+      die "this is a Windows shell — use install.ps1 instead:
+    powershell -ExecutionPolicy Bypass -c \"irm https://raw.githubusercontent.com/${REPO}/${REF}/install.ps1 | iex\""
+      ;;
+  esac
+}
+
 # The key goes in the state directory, never the package directory, so it is
 # only ever entered once per machine and never logged.
 collect_key() {
@@ -309,6 +322,7 @@ next_steps() {
 
 main() {
   parse_args "$@"
+  guard_windows
   need_node
   collect_key
   install_package

@@ -16,7 +16,8 @@ android_read       return the screen's text, read from the view hierarchy
 android_location   the location Facebook attributes to the signed-in account
 ```
 
-Any harness — Command Code, Claude Code, Cursor, Codex — can call these over MCP.
+Any MCP-capable harness — Command Code, Claude Code, Cursor, Codex, OpenCode,
+Windsurf, Gemini CLI, VS Code, and anything else — can call these over MCP.
 The harness brings the reasoning, this server brings the device, Jev brings the
 decisions. The model never invents an action: it picks one id from a set this server
 built from the live DOM or the live view hierarchy, and the choice is validated
@@ -47,6 +48,15 @@ Supply the key up front with `--key=<key>` instead of being prompted (Windows:
 `install.ps1 -Key <key>`), or export `TYPESAFE_API_KEY` first. It is
 idempotent — running it again repairs rather than reinstalls. Both scripts are
 short enough to read before you run them.
+
+**Global install.** `npm install -g <package>` runs the same install through its
+`postinstall`, so a plain global install is enough on a fresh device — then
+`jev-use install` to repair, or to pick up a harness you installed later. It
+installs into npm's global directory when that is writable, and falls back to a
+user-owned prefix when it needs an elevated shell, so it does not stop to ask for
+admin. On Windows, `install.sh` refuses under Git Bash/MSYS and points at
+`install.ps1`: the POSIX bootstrap would run against the Windows node/npm and
+build a half-broken environment whose real breakage only shows up later.
 
 **Private repo: the one-liners above do not work, and adding collaborators does
 not change that.** `raw.githubusercontent.com` is fetched without credentials, so
@@ -189,7 +199,16 @@ Both skills are installed by the npm package; `adb` itself is a distro package
 as slash commands but does not surface MCP prompts. The server also exposes the same
 guidance as the MCP prompts `browser-use` and `mobile-use` for harnesses that do support
 prompts. `jev-use install` installs both skills into every harness skills directory it
-finds — Command Code, Claude Code, Codex, and the shared `~/.agents/skills`.
+finds — Command Code, Claude Code, Codex, OpenCode, and the shared `~/.agents/skills`.
+
+**Any harness.** MCP is the whole interface, so it does not matter which one you
+use. `jev-use harnesses` lists every harness this knows how to register with, its
+config file, and whether it was detected. `jev-use install --harness=<id,...>`
+restricts registration to the ids you name — and forces them even when detection
+did not fire, which is the escape hatch for a harness this has an adapter for but
+no evidence of. For anything *else*, `jev-use harnesses --print` emits the one
+block any MCP-capable harness needs, and the global install puts `jev-use-mcp` on
+PATH so a harness can be pointed at the bare command instead of an absolute path.
 
 Either way the guidance is identical: discover → open if needed → drive → **read** →
 report, with an explicit instruction to call `browser_open` when nothing is drivable
@@ -592,7 +611,7 @@ jev_use/mcp_server.py  the MCP surface, browser and Android
 jev_use/profiles.py    profile registry, copy-and-launch, and the CLI
 jev_use/text_model.py  the planner and writer Jev structurally cannot be
 install.sh, install.ps1  the one-command bootstrap (curl|bash, irm|iex)
-bin/, lib/             the npm installer
+bin/, lib/             the npm installer (lib/harnesses/ registers with each harness)
 scripts/enable-cdp.sh  thin wrapper over profiles.py (--list / --open NAME)
 skills/browser-use/    the same guidance as an agent skill (/browser-use)
 skills/mobile-use/     ditto, for the phone (/mobile-use)
@@ -601,7 +620,9 @@ tests/                 python tests, test/ node tests
 
 `jev_use/candidates.py`, `loop.py` and `cli.py` are the retired desktop surface. They
 are unregistered from MCP and kept on disk only so the work is not lost; nothing in the
-browser or Android path imports them.
+browser or Android path imports them. `cli.py` stays reachable as the `jev-desktop`
+console script — not `jev-use`, which the npm package owns, and it does not run on
+Windows because the AT-SPI code behind it is Linux-only.
 
 ## Test
 

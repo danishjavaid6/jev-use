@@ -21,6 +21,10 @@ const claude = require('../lib/harnesses/claude');
 const codex = require('../lib/harnesses/codex');
 const cursor = require('../lib/harnesses/cursor');
 const opencode = require('../lib/harnesses/opencode');
+const windsurf = require('../lib/harnesses/windsurf');
+const gemini = require('../lib/harnesses/gemini');
+const vscode = require('../lib/harnesses/vscode');
+const registry = require('../lib/harnesses');
 
 const ENTRY = { command: '/usr/bin/node', args: ['/opt/jev-use/bin/jev-use-mcp.js'] };
 
@@ -278,4 +282,78 @@ test('a harness with no entry of ours reports nothing', () => {
 test('an unparseable config reads as unregistered, not as a crash', () => {
   write(path.join(home, '.cursor', 'mcp.json'), '{ this is not json');
   assert.equal(cursor.registered(), null, 'doctor must not throw over someone else\'s file');
+});
+
+// -- the new adapters, built through the shared factory ---------------------
+
+test('windsurf and gemini write a plain mcpServers map', () => {
+  fs.mkdirSync(path.join(home, '.codeium', 'windsurf'), { recursive: true });
+  fs.mkdirSync(path.join(home, '.gemini'), { recursive: true });
+
+  const wind = windsurf.register(ENTRY);
+  const gem = gemini.register(ENTRY);
+
+  assert.equal(readJson(wind).mcpServers['jev-use'].command, ENTRY.command);
+  assert.equal(readJson(gem).mcpServers['jev-use'].command, ENTRY.command);
+});
+
+test('vscode uses the servers key and an explicit stdio type', () => {
+  const file = vscode.configFile();
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+
+  const written = vscode.register(ENTRY);
+  const entry = readJson(written).servers['jev-use'];
+
+  assert.equal(entry.type, 'stdio', 'VS Code needs the type to know it is a process');
+  assert.equal(entry.command, ENTRY.command);
+  assert.deepEqual(entry.args, ENTRY.args);
+});
+
+test('vscode preserves the unrelated keys in a profile mcp.json', () => {
+  const file = vscode.configFile();
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  write(file, JSON.stringify({ inputs: [{ id: 'x' }], servers: { other: { command: 'x' } } }));
+
+  vscode.register(ENTRY);
+  const config = readJson(file);
+
+  assert.ok(config.inputs, 'the top-level inputs array survives');
+  assert.ok(config.servers.other, 'another server survives');
+  assert.ok(config.servers['jev-use']);
+});
+
+test('the new adapters read their entry back for doctor', () => {
+  fs.mkdirSync(path.dirname(vscode.configFile()), { recursive: true });
+  vscode.register(ENTRY);
+  assert.deepEqual(vscode.registered(), ENTRY);
+
+  fs.mkdirSync(path.join(home, '.codeium', 'windsurf'), { recursive: true });
+  windsurf.register(ENTRY);
+  assert.deepEqual(windsurf.registered(), ENTRY);
+});
+
+// -- the registry -----------------------------------------------------------
+
+test('every adapter id is unique, because ids are what --harness names', () => {
+  const ids = registry.ALL.map((harness) => harness.id);
+  assert.equal(new Set(ids).size, ids.length);
+  for (const harness of registry.ALL) {
+    assert.match(harness.id, /^[a-z0-9]+$/, `${harness.id} is a usable flag value`);
+  }
+});
+
+test('byId finds an adapter and reports null for anything else', () => {
+  assert.equal(registry.byId('windsurf').name, 'Windsurf');
+  assert.equal(registry.byId('nope'), null);
+});
+
+test('the generic snippet names the command, the args and the PATH launcher', () => {
+  const text = registry.snippet(ENTRY);
+  assert.ok(text.includes(ENTRY.command));
+  assert.ok(text.includes(ENTRY.args[0]));
+  assert.ok(text.includes('jev-use-mcp'), 'the launcher is the route for an unknown harness');
+
+  // The block is meant to be pasted, so it has to be valid JSON.
+  const block = JSON.parse(text.slice(text.indexOf('{')));
+  assert.deepEqual(block.mcpServers['jev-use'], { command: ENTRY.command, args: ENTRY.args });
 });
