@@ -169,7 +169,11 @@ def test_a_healthy_driver_session_is_reused(monkeypatch: pytest.MonkeyPatch) -> 
             self._alive = False
 
     monkeypatch.setattr(mcp_server, "Driver", FakeDriver)
-    monkeypatch.setattr(mcp_server, "attach_helpfully", lambda driver, profile=None: ("t", profile))
+    monkeypatch.setattr(
+        mcp_server,
+        "attach_helpfully",
+        lambda driver, profile=None, port=None: ("t", profile, port),
+    )
     mcp_server.reset_browser_session()
     try:
         first, _ = mcp_server._browser_session(None)
@@ -184,6 +188,15 @@ def test_a_healthy_driver_session_is_reused(monkeypatch: pytest.MonkeyPatch) -> 
         work, _ = mcp_server._browser_session("work")
         home, _ = mcp_server._browser_session("home")
         assert work is not home, "a different profile needs a different attach"
+
+        # An explicit port is part of the session key too: same port reuses, a
+        # different port re-attaches (GoLogin picks a new random port each launch).
+        p1, t1 = mcp_server._browser_session(None, 53142)
+        p2, t2 = mcp_server._browser_session(None, 53142)
+        assert p1 is p2 and t1 == t2, "the same port is the same session"
+        assert t2 == ("t", None, 53142), "the port reaches attach_helpfully"
+        p3, _ = mcp_server._browser_session(None, 53143)
+        assert p3 is not p1, "a different port needs a different attach"
     finally:
         mcp_server.reset_browser_session()
 
@@ -203,3 +216,20 @@ def test_load_env_does_not_clobber_an_existing_value(
 def test_load_env_survives_a_missing_file(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     monkeypatch.setattr(mcp_server, "__file__", str(tmp_path / "pkg" / "mcp_server.py"))
     mcp_server.load_env()
+
+
+# -- the explicit port argument ---------------------------------------------
+#
+# A harness sends JSON, so `port` can arrive as a number or a string, and a
+# missing one must read as "auto-detect" rather than 0 (port 0 is a real,
+# meaninglessly-low value that would fail the /json/version probe with a
+# confusing message).
+
+
+def test_port_argument_is_parsed_leniently() -> None:
+    assert mcp_server._port({}) is None
+    assert mcp_server._port({"port": None}) is None
+    assert mcp_server._port({"port": ""}) is None
+    assert mcp_server._port({"port": 9222}) == 9222
+    assert mcp_server._port({"port": "53142"}) == 53142
+    assert mcp_server._port({"port": "not-a-port"}) is None

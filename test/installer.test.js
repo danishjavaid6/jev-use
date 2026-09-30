@@ -216,3 +216,64 @@ test('--harness registers only what it names', async () => {
     'a detected harness is skipped when the flag names another'
   );
 });
+
+// -- GoLogin -----------------------------------------------------------------
+//
+// A GoLogin token is what stands between "these profiles exist" and "browser_open
+// can launch one in its own browser" — so it is saved, and it is what triggers the
+// optional SDK install, plus the browser-harness CDP client the profile is driven
+// over. Without a token we must not drag requests + psutil + cdp-use in.
+
+test('a GoLogin token is saved and pulls in the GoLogin SDK', async () => {
+  const calls = [];
+  const originalExtra = runtime.installExtra;
+  const originalEnv = process.env.GOLOGIN_TOKEN;
+  delete process.env.GOLOGIN_TOKEN;
+  runtime.installExtra = (name) => {
+    calls.push(name);
+    return null;
+  };
+
+  try {
+    const summary = await installer.install({
+      auto: true,
+      key: 'sk-test',
+      gologinToken: 'gl-abc',
+    });
+
+    assert.equal(summary.gologin, true);
+    assert.deepEqual(
+      calls,
+      ['gologin', 'harness'],
+      'the token asks for the SDK and the CDP client it is driven over'
+    );
+    const env = fs.readFileSync(path.join(dir, '.env'), 'utf8');
+    assert.match(env, /GOLOGIN_TOKEN=gl-abc/);
+    assert.match(env, /TYPESAFE_API_KEY=sk-test/, 'the Jev key is not dropped');
+  } finally {
+    runtime.installExtra = originalExtra;
+    if (originalEnv === undefined) delete process.env.GOLOGIN_TOKEN;
+    else process.env.GOLOGIN_TOKEN = originalEnv;
+  }
+});
+
+test('the GoLogin SDK is not installed without a token', async () => {
+  const calls = [];
+  const originalExtra = runtime.installExtra;
+  const originalEnv = process.env.GOLOGIN_TOKEN;
+  delete process.env.GOLOGIN_TOKEN;
+  runtime.installExtra = (name) => {
+    calls.push(name);
+    return null;
+  };
+
+  try {
+    const summary = await installer.install({ auto: true, key: 'sk-test' });
+    assert.equal(summary.gologin, false);
+    assert.deepEqual(calls, [], 'nobody who does not use GoLogin pays for its dependency');
+  } finally {
+    runtime.installExtra = originalExtra;
+    if (originalEnv === undefined) delete process.env.GOLOGIN_TOKEN;
+    else process.env.GOLOGIN_TOKEN = originalEnv;
+  }
+});

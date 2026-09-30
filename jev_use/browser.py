@@ -44,6 +44,15 @@ DEFAULT_PORT = 9222
 DEFAULT_PROFILE = chrome_user_data_root()
 URL_PATTERN = re.compile(r"https?://[^\s\"'<>]+")
 
+#: GoLogin (and the SDKs built on it) launch Orbita with `--gologin-profile=<name>`
+#: and a *random* `--remote-debugging-port`. The flag is the reliable marker of a
+#: GoLogin browser: the Orbita binary is plain `chrome` on Linux and Windows, so
+#: the executable name alone cannot tell it apart from a normal Chrome.
+GOLOGIN_OPTION = "gologin-profile"
+#: The token that marks an Orbita path even when the launch flag is missing —
+#: `~/.gologin/browser/orbita-browser-<major>/...`.
+GOLOGIN_PATH_MARKER = ".gologin"
+
 BROWSER_OPERATIONS = {
     "click_element": "Activate exactly one of the listed page elements",
     "type_text": "Write a value into one of the listed form fields",
@@ -136,6 +145,52 @@ def click_js(ref: int) -> str:
     )
 
 
+def element_center_js(ref: int) -> str:
+    """The viewport coordinates of a ref's centre, for a real mouse click.
+
+    Scrolls it into view first, then reports the centre — and refuses when the
+    element has no box or sits outside the viewport, because a coordinate click on
+    an off-screen point lands on whatever happens to be there instead. A refusal
+    falls back to the DOM click rather than guessing.
+    """
+    return (
+        "(() => {"
+        f"const e = document.querySelector('[data-jev-ref=\"{int(ref)}\"]');"
+        "if (!e) return JSON.stringify({ok:false, reason:'ref not found'});"
+        "e.scrollIntoView({block:'center', inline:'center'});"
+        "const r = e.getBoundingClientRect();"
+        "if (r.width < 1 || r.height < 1) "
+        "return JSON.stringify({ok:false, reason:'no box'});"
+        "const x = r.left + r.width / 2, y = r.top + r.height / 2;"
+        "if (x < 0 || y < 0 || x > innerWidth || y > innerHeight) "
+        "return JSON.stringify({ok:false, reason:'outside viewport'});"
+        "return JSON.stringify({ok:true, x:x, y:y, tag:e.tagName.toLowerCase()});"
+        "})()"
+    )
+
+
+def click(session: Any, target: Target, ref: int) -> None:
+    """Click a ref, through the browser's input pipeline when the transport has one.
+
+    A trusted click is the point: CDP `Input.dispatchMouseEvent` produces events
+    the page cannot tell from a mouse, while `element.click()` yields
+    `isTrusted: false` and is ignored by anything that checks (file inputs,
+    drag/drop, upload and payment widgets). The DOM click stays as the fallback for
+    the transports with no input channel — the driver's `page` tool exposes only
+    `execute_javascript` — and for an element whose centre cannot be clicked.
+    """
+    clicker = getattr(session, "click_at", None)
+    if callable(clicker):
+        point = _action_result(session, target, element_center_js(int(ref)))
+        if point.get("ok"):
+            clicker(point["x"], point["y"], url_hint=target.url_hint)
+            return
+
+    result = _action_result(session, target, click_js(int(ref)))
+    if not result.get("ok"):
+        raise DriverError(f"click failed: {result.get('reason', 'unknown')}")
+
+
 def type_js(ref: int, text: str) -> str:
     """Fill a field and announce it.
 
@@ -205,15 +260,25 @@ class Profile:
     port: int | None
     window_id: int | None = None
     title: str = ""
+    #: The human profile name, when the browser reports one the directory does not
+    #: carry. GoLogin puts the profile name on the command line, not the path.
+    name: str = ""
+    #: "chrome" for a normal browser, else the vendor that launched it ("gologin").
+    vendor: str = "chrome"
 
     @property
     def cdp(self) -> bool:
         return self.port is not None
 
+    @property
+    def label(self) -> str:
+        """The best name to show a human: the vendor's name, else the directory."""
+        return self.name or Path(self.profile_dir).name or self.profile_dir
+
     def describe(self) -> str:
-        name = Path(self.profile_dir).name or self.profile_dir
+        tag = f"[{self.vendor}] " if self.vendor != "chrome" else ""
         return (
-            f"pid={self.pid} profile={name} dir={self.profile_dir} "
+            f"{tag}pid={self.pid} profile={self.label} dir={self.profile_dir} "
             f"cdp={'yes:' + str(self.port) if self.cdp else 'no'}"
             + (f" window={self.window_id}" if self.window_id else "")
         )
@@ -237,8 +302,29 @@ def _is_browser_process(args: str) -> bool:
     with a space is normal: `"C:\\Program Files\\Google\\Chrome\\...\\chrome.exe"`.
     The comparison is on the executable's stem, so `chrome` and `chrome.exe` are
     the same browser.
+
+    GoLogin's Orbita is a second, decisive marker rather than a name: it is plain
+    `chrome` on Linux and Windows, but it always carries `--gologin-profile=<name>`
+    on its command line. Matching that flag names the browser as an antidetect one
+    even when its executable looks exactly like stock Chrome.
     """
+    if _option(args, GOLOGIN_OPTION) is not None:
+        return True
     return host.executable_stem(argv0(args)) in BROWSER_BINARIES
+
+
+def _vendor(args: str) -> str:
+    """Which antidetect product launched this browser, or "chrome" if none did."""
+    if _option(args, GOLOGIN_OPTION) is not None:
+        return "gologin"
+    # Only the executable and the profile directory are evidence — a normal Chrome
+    # pointed at a gologin.com URL must not be labelled as GoLogin.
+    exe = argv0(args)
+    if GOLOGIN_PATH_MARKER in exe or host.executable_stem(exe) in ("orbita", "orbita-browser"):
+        return "gologin"
+    if GOLOGIN_PATH_MARKER in (_option(args, "user-data-dir") or ""):
+        return "gologin"
+    return "chrome"
 
 
 def _option(args: str, name: str) -> str | None:
@@ -251,6 +337,20 @@ def _option(args: str, name: str) -> str | None:
     if not match:
         return None
     return match.group(1) or match.group(2)
+
+
+#: A GoLogin profile name is free text ("Acme Ads"), and `ps` space-joins argv, so
+#: the name runs until the next option rather than to the next space. Quoted values
+#: are taken as-is; the lookahead keeps a trailing flag from being swallowed.
+_GOLOGIN_NAME = re.compile(r'--gologin-profile=(?:"([^"]*)"|(.*?))(?=\s+--|$)')
+
+
+def _gologin_name(args: str) -> str:
+    """The GoLogin profile name on this command line, or ""."""
+    match = _GOLOGIN_NAME.search(args)
+    if not match:
+        return ""
+    return (match.group(1) or match.group(2) or "").strip()
 
 
 def running_profiles() -> list[Profile]:
@@ -276,9 +376,14 @@ def running_profiles() -> list[Profile]:
         port_text = _option(args, "remote-debugging-port")
         port: int | None = int(port_text) if port_text and port_text.isdigit() else None
 
+        vendor = _vendor(args)
+        # GoLogin names the profile on the command line, not the path: the copy it
+        # runs lives at <tmp>/gologin_<id>, which is meaningless to a human.
+        name = _gologin_name(args) if vendor == "gologin" else ""
+
         existing = found.get(pid)
         if existing is None:
-            found[pid] = Profile(pid=pid, profile_dir=profile, port=port)
+            found[pid] = Profile(pid=pid, profile_dir=profile, port=port, vendor=vendor, name=name)
         elif port is not None:
             existing.port = port
 
@@ -401,9 +506,11 @@ def _chrome_window(driver: Driver, prefer_pid: int | None = None) -> tuple[int, 
     windows = driver.call("list_windows", {}).json().get("windows", [])
 
     def is_chrome(w: dict[str, Any]) -> bool:
-        return "chrome" in (w.get("app_name") or "").lower() or "chrome" in (
-            w.get("title") or ""
-        ).lower()
+        # Orbita (GoLogin's Chromium) titles its window as Orbita, not Chrome, so
+        # matching on "chrome" alone would find no window to bind when driving a
+        # GoLogin profile.
+        haystack = f"{w.get('app_name') or ''} {w.get('title') or ''}".lower()
+        return any(name in haystack for name in ("chrome", "orbita"))
 
     candidates = [w for w in windows if is_chrome(w)]
     if prefer_pid is not None:
@@ -455,13 +562,20 @@ def _pick_profile(
         directory = _resolve_profile_hint(wanted)
         needles = {wanted.lower(), directory.lower(), slug(directory)}
         # A prepared copy lives at <work>/<slug>, so match on the dir basename too.
+        # GoLogin has neither: its directory is <tmp>/gologin_<id> and the only
+        # human name is the one on the command line, so match `p.name` as well.
         candidates = [
             p
             for p in profiles
-            if any(n in p.profile_dir.lower() or n == Path(p.profile_dir).name.lower() for n in needles)
+            if any(
+                n in p.profile_dir.lower()
+                or n == Path(p.profile_dir).name.lower()
+                or n in p.name.lower()
+                for n in needles
+            )
         ]
         if not candidates:
-            available = ", ".join(sorted({Path(p.profile_dir).name for p in profiles}))
+            available = ", ".join(sorted({p.label for p in profiles}))
             return None, (
                 f"no running browser matches profile {wanted!r} (have: {available}). "
                 "If it is not open yet, use browser_open first."
@@ -481,12 +595,18 @@ def _pick_profile(
 
 
 def attach(
-    driver: Driver,
+    session: Any,
     port: int | None = None,
     url_hint: str | None = None,
     profile: str | None = None,
 ) -> Target:
-    """Bind to a CDP-capable Chrome, or fail fast with the exact remediation."""
+    """Bind to a CDP-capable Chrome, or fail fast with the exact remediation.
+
+    `session` is either a `Driver`, whose `page` tool addresses a tab by
+    pid + window, or a `Harness`, which speaks CDP straight to the port. Both reach
+    the same browsers; only the addressing differs, and only the port is required
+    either way.
+    """
     owner_pid: int | None = None
     profiles = running_profiles()
 
@@ -499,6 +619,10 @@ def attach(
                 "Chrome is single-instance and the debug port can only be set at launch,\n"
                 "so run this once (it refuses while Chrome is open):\n\n"
                 f"    {host.launcher_hint()}\n\n"
+                "For GoLogin: a profile must be started with a debugging port (the "
+                "GoLogin SDK/API does this and hands back the port). Then pass it as "
+                "`port`, or launch Orbita with --remote-debugging-port and it is found "
+                "automatically.\n\n"
                 f"Running browsers:\n{seen}"
             )
         port, owner_pid = chosen.port, chosen.pid
@@ -506,9 +630,22 @@ def attach(
         owner_pid = next((p.pid for p in profiles if p.port == port), None)
 
     if not cdp_alive(port):
-        raise DriverError(f"port {port} is not answering /json/version")
+        raise DriverError(
+            f"port {port} is not answering /json/version — nothing is listening there. "
+            "A debug port only exists if the browser was started with one, so for a "
+            "GoLogin/Orbita profile launch it through the GoLogin API/SDK (which "
+            "returns the port) and use that."
+        )
 
-    pid, window_id = _chrome_window(driver, prefer_pid=owner_pid)
+    # A Harness holds the CDP connection itself, so there is no window to bind:
+    # pid and window are the `page` tool's addressing, which this transport never
+    # uses. Skipping `list_windows` also means a GoLogin profile is drivable where
+    # no window can be bound at all (GNOME/Wayland), which is where the typed
+    # driver tools are unusable and `page` was the only route.
+    if callable(getattr(session, "evaluate", None)):
+        return Target(port=port, pid=owner_pid or 0, window_id=0, url_hint=url_hint)
+
+    pid, window_id = _chrome_window(session, prefer_pid=owner_pid)
     return Target(port=port, pid=pid, window_id=window_id, url_hint=url_hint)
 
 
@@ -688,8 +825,18 @@ class Observation:
         return f"{self.url}|{self.title}|{digest}"
 
 
-def _js(driver: Driver, target: Target, javascript: str) -> str:
-    return driver.call(
+def _js(session: Any, target: Target, javascript: str) -> str:
+    """Run one script in the target's tab, on whichever transport we were handed.
+
+    A `Harness` exposes `evaluate`; the driver exposes the `page` tool. Duck-typing
+    on that keeps this module (and everything above it) free of a `harness` import
+    and of the optional dependency behind it, while letting both transports serve
+    every call site below unchanged.
+    """
+    evaluate = getattr(session, "evaluate", None)
+    if callable(evaluate):
+        return evaluate(javascript, url_hint=target.url_hint)
+    return session.call(
         "page", target.args(action="execute_javascript", javascript=javascript)
     ).text
 
@@ -967,11 +1114,11 @@ def read_many(
     model turn). This is ONE call that opens a tab per URL and reads them together,
     so the page loads overlap and the harness pays one turn instead of N.
 
-    Each worker gets its **own** driver process: the client serialises calls through
-    one driver (a lock around every request), so sharing it would quietly put the
-    workers back in a single queue and buy nothing. Each worker also owns its tab and
-    pins to it by URL — `target_url_contains` is the only way to say which tab a CDP
-    call reaches.
+    Each worker gets its **own** transport — a driver process, or a harness
+    connection. The driver client serialises calls through one process (a lock
+    around every request), so sharing it would quietly put the workers back in a
+    single queue and buy nothing. Each worker also owns its tab and pins to it by
+    URL, which is the only way to say which tab a CDP call reaches.
 
     A page that fails is reported in its own slot, so one bad site cannot sink the
     batch. Tabs we opened are closed again.
@@ -1071,20 +1218,18 @@ def type_into(driver: Driver, target: Target, ref: str, text: str) -> None:
         raise DriverError(f"type failed: {result.get('reason', 'unknown')}")
 
 
-def execute(driver: Driver, target: Target, decision: Decision, observation: Observation) -> None:
+def execute(session: Any, target: Target, decision: Decision, observation: Observation) -> None:
     if decision.kind == "type_text":
         raise ValueError("type_text needs the text resolved first; use run()")
     if decision.kind == "click_element":
-        result = _action_result(driver, target, click_js(int(decision.element_id or 0)))
-        if not result.get("ok"):
-            raise DriverError(f"click failed: {result.get('reason', 'unknown')}")
+        click(session, target, int(decision.element_id or 0))
         return
     if decision.kind in ("scroll_down", "scroll_up"):
         delta = SCROLL_PIXELS if decision.kind == "scroll_down" else -SCROLL_PIXELS
-        _js(driver, target, scroll_js(delta))
+        _js(session, target, scroll_js(delta))
         return
     if decision.kind == "navigate" and observation.navigate_url:
-        _js(driver, target, navigate_js(observation.navigate_url))
+        _js(session, target, navigate_js(observation.navigate_url))
         return
     if decision.kind == "wait":
         time.sleep(1.0)

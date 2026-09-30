@@ -75,6 +75,13 @@ def work_root() -> Path:
 #: Executable *stems*. Chrome ships as `chrome` on Linux (the `google-chrome`
 #: wrapper execs it) and `chrome.exe` on Windows; comparing stems makes both the
 #: same string. Never match on a substring — see `_is_browser_process`.
+#:
+#: The antidetect browsers are here too because they are Chromium under a
+#: different name, and a user who runs one expects it to be found: GoLogin's
+#: Orbita is `chrome` on Linux/Windows but `Orbita` on macOS, and AdsPower's is
+#: `SunBrowser`. Detection does not rest on this list alone (GoLogin is also
+#: recognised by its launch flag), but the name is what makes the macOS build
+#: visible at all.
 BROWSER_BINARY_NAMES = frozenset(
     {
         "chrome",
@@ -85,6 +92,9 @@ BROWSER_BINARY_NAMES = frozenset(
         "brave",
         "brave-browser",
         "msedge",
+        "orbita",
+        "orbita-browser",
+        "sunbrowser",
     }
 )
 
@@ -164,6 +174,19 @@ def browser_install_hint() -> str:
     if IS_MACOS:
         return "install Google Chrome into /Applications"
     return "install google-chrome, chromium or brave with your package manager"
+
+
+def gologin_browser_root() -> Path:
+    """Where GoLogin keeps the Orbita builds it launches profiles from.
+
+    Orbita is GoLogin's Chromium fork, downloaded per major version into
+    `~/.gologin/browser/orbita-browser-<major>` (the same layout on every
+    platform; only the executable inside differs). Used for diagnostics — "the
+    browser_use tools find nothing" is very often "GoLogin is installed but no
+    profile is running with a debugging port", and naming the directory says
+    which of those it is.
+    """
+    return Path.home() / ".gologin" / "browser"
 
 
 # -- copying a profile ------------------------------------------------------

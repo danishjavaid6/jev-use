@@ -44,6 +44,87 @@ def test_click_js_refuses_a_non_integer_ref() -> None:
         browser.click_js("1']; alert(1); //")  # type: ignore[arg-type]
 
 
+def test_element_center_js_scrolls_then_reports_the_centre() -> None:
+    """A coordinate click must be aimed at somewhere real: scroll it in, then measure
+    it — and refuse an off-screen point rather than clicking whatever is there."""
+    js = browser.element_center_js(7)
+    assert "'[data-jev-ref=\"7\"]'" in js
+    assert "scrollIntoView" in js
+    assert "getBoundingClientRect" in js
+    assert "innerWidth" in js, "the viewport bound is what makes the refusal possible"
+
+
+def test_element_center_js_refuses_a_non_integer_ref() -> None:
+    with pytest.raises(ValueError):
+        browser.element_center_js("1']; alert(1); //")  # type: ignore[arg-type]
+
+
+class ClickHarness:
+    """A transport with an input channel, recording what it was asked to do."""
+
+    def __init__(self, point: dict) -> None:
+        self.point = point
+        self.clicked: list[tuple[float, float, str | None]] = []
+        self.scripts: list[str] = []
+
+    def evaluate(self, javascript: str, url_hint: str | None = None) -> str:
+        self.scripts.append(javascript)
+        if "e.click()" in javascript:
+            return json.dumps({"ok": True, "tag": "button"})
+        return json.dumps(self.point)
+
+    def click_at(self, x: float, y: float, url_hint: str | None = None) -> None:
+        self.clicked.append((x, y, url_hint))
+
+
+TARGET = browser.Target(port=53142, pid=0, window_id=0, url_hint="https://x.test/p")
+
+
+def test_a_transport_with_an_input_channel_is_clicked_at_the_element_centre() -> None:
+    """A real mouse event is the point: `element.click()` is `isTrusted: false`, and
+    anything that checks (file inputs, drag/drop, upload widgets) ignores it."""
+    session = ClickHarness({"ok": True, "x": 12.5, "y": 40, "tag": "button"})
+
+    browser.click(session, TARGET, 3)
+
+    assert session.clicked == [(12.5, 40, "https://x.test/p")]
+    assert not any("e.click()" in script for script in session.scripts), (
+        "a trusted click must not also fire a synthetic one"
+    )
+
+
+def test_an_unclickable_centre_falls_back_to_the_dom_click() -> None:
+    session = ClickHarness({"ok": False, "reason": "outside viewport"})
+
+    browser.click(session, TARGET, 3)
+
+    assert session.clicked == [], "never aim a coordinate click at a point that is not there"
+    assert any("e.click()" in script for script in session.scripts)
+
+
+def test_a_transport_without_an_input_channel_uses_the_dom_click() -> None:
+    class NoInput:
+        def __init__(self) -> None:
+            self.scripts: list[str] = []
+
+        def evaluate(self, javascript: str, url_hint: str | None = None) -> str:
+            self.scripts.append(javascript)
+            return json.dumps({"ok": True, "tag": "button"})
+
+    session = NoInput()
+    browser.click(session, TARGET, 3)
+    assert any("e.click()" in script for script in session.scripts)
+
+
+def test_a_failed_click_is_reported() -> None:
+    class NeverClicks:
+        def evaluate(self, javascript: str, url_hint: str | None = None) -> str:
+            return json.dumps({"ok": False, "reason": "ref not found"})
+
+    with pytest.raises(DriverError):
+        browser.click(NeverClicks(), TARGET, 3)
+
+
 def test_parse_js_payload_handles_the_prose_envelope() -> None:
     envelope = '\u2705 Ran script:\n{"url":"https://x.test","title":"t","elements":[]}'
     payload = browser._parse_js_payload(envelope)
@@ -206,6 +287,71 @@ def test_cdp_alive_is_false_when_nothing_answers() -> None:
     assert browser.cdp_alive(9, timeout=0.2) is False
 
 
+# -- GoLogin / antidetect browsers ------------------------------------------
+#
+# Orbita is Chromium under GoLogin's launcher: the executable is plain `chrome`
+# on Linux and Windows, and the debug port is chosen at random. The
+# `--gologin-profile` flag is what identifies it, and the profile name is on the
+# command line rather than the (temporary) profile path.
+
+
+def test_gologin_flag_identifies_a_browser_the_name_cannot() -> None:
+    assert browser._is_browser_process("/opt/weird/vendor-bin --gologin-profile=Work")
+
+
+def test_gologin_orbita_is_known_on_macos_by_name() -> None:
+    # The macOS build is `Orbita`, not `chrome`, and carries no extra flag here.
+    assert browser._is_browser_process(
+        "/Users/me/.gologin/browser/orbita-browser-132/Orbita-Browser.app/Contents/MacOS/Orbita"
+    )
+
+
+def test_running_profiles_labels_a_gologin_browser(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        browser,
+        "_process_table",
+        lambda *a, **k: [
+            (
+                555,
+                "/tmp/gologin_abc/chrome --remote-debugging-port=53142 "
+                "--user-data-dir=/tmp/gologin_abc --gologin-profile=Acme Ads",
+            ),
+        ],
+    )
+    profiles = browser.running_profiles()
+
+    assert len(profiles) == 1
+    assert profiles[0].vendor == "gologin"
+    assert profiles[0].name == "Acme Ads"
+    assert profiles[0].port == 53142
+    assert profiles[0].label == "Acme Ads", "the human name comes from the flag, not the tmp dir"
+    assert "[gologin]" in profiles[0].describe()
+
+
+def test_a_gologin_browser_is_not_mistaken_for_the_phantom_bug(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The marker must not fire on an unrelated command line that merely mentions
+    GoLogin (a CLI, a log path) — only on the launch flag."""
+    assert browser._is_browser_process("npm exec gologin-cli -- list-profiles") is False
+    assert browser._is_browser_process("tail -f /var/log/gologin.log") is False
+
+
+def test_a_url_is_not_evidence_of_the_vendor() -> None:
+    """A normal Chrome opened on a gologin.com page must not be labelled GoLogin —
+    only the executable and the profile directory count."""
+    args = (
+        "/opt/google/chrome/chrome --user-data-dir=/home/me/.config/google-chrome "
+        "https://app.gologin.com/profile"
+    )
+    assert browser._vendor(args) == "chrome"
+
+    orbita = "/home/me/.gologin/browser/orbita-browser-132/chrome --user-data-dir=/tmp/gologin_x"
+    assert browser._vendor(orbita) == "gologin"
+
+
 # -- attach -----------------------------------------------------------------
 
 
@@ -273,6 +419,66 @@ def test_attach_honours_an_explicit_profile(monkeypatch: pytest.MonkeyPatch) -> 
     target = browser.attach(FakeDriver(), profile="work")
     assert target.port == 9223
     assert target.pid == 300
+
+
+def test_attach_binds_an_explicit_port_that_discovery_cannot_see(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GoLogin's port is random and its process is not always in the table, so the
+    explicit port is the route that reaches it — no profile matching involved."""
+    monkeypatch.setattr(browser, "running_profiles", lambda: [])
+    monkeypatch.setattr(browser, "cdp_alive", lambda port, timeout=1.5: port == 53142)
+
+    class FakeDriver:
+        def call(self, tool, args=None):
+            class R:
+                def json(self):
+                    return {"windows": [{"pid": 2, "window_id": 5, "app_name": "Orbita", "title": "x"}]}
+
+            return R()
+
+    target = browser.attach(FakeDriver(), port=53142)
+    assert target.port == 53142
+    assert target.pid == 2
+
+
+def test_attach_matches_a_gologin_profile_by_its_display_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gologin = browser.Profile(
+        pid=9, profile_dir="/tmp/gologin_abc", port=53142, vendor="gologin", name="Acme Ads"
+    )
+    monkeypatch.setattr(browser, "running_profiles", lambda: [gologin])
+    monkeypatch.setattr(browser, "cdp_alive", lambda port, timeout=1.5: True)
+
+    class FakeDriver:
+        def call(self, tool, args=None):
+            class R:
+                def json(self):
+                    # Orbita names its window `Orbita`; the bind must still find it.
+                    return {
+                        "windows": [
+                            {"pid": 9, "window_id": 3, "app_name": "Orbita", "title": "Acme Ads"}
+                        ]
+                    }
+
+            return R()
+
+    target = browser.attach(FakeDriver(), profile="acme")
+    assert target.port == 53142
+    assert target.pid == 9
+
+
+def test_attach_refuses_a_dead_explicit_port_with_a_useful_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(browser, "running_profiles", lambda: [])
+    monkeypatch.setattr(browser, "cdp_alive", lambda port, timeout=1.5: False)
+
+    with pytest.raises(DriverError) as excinfo:
+        browser.attach(object(), port=53142)  # type: ignore[arg-type]
+    assert "53142" in str(excinfo.value)
+    assert "GoLogin" in str(excinfo.value)
 
 
 def test_attach_names_available_profiles_on_a_bad_hint(
@@ -885,6 +1091,7 @@ def test_surface_is_browser_and_android_only() -> None:
     assert names == [
         "browser_profiles",
         "browser_open",
+        "browser_close",
         "browser_use",
         "browser_extract",
         "browser_read",

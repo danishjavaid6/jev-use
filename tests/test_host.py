@@ -202,3 +202,17 @@ def test_launcher_hint_is_per_platform(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(host, "IS_WINDOWS", True)
     assert host.launcher_hint() == "scripts/enable-cdp.ps1"
+
+
+# -- antidetect browsers ----------------------------------------------------
+
+
+def test_gologin_browser_root_sits_under_home() -> None:
+    assert host.gologin_browser_root() == Path.home() / ".gologin" / "browser"
+
+
+def test_antidetect_browser_names_are_known() -> None:
+    """GoLogin's Orbita is `chrome` on Linux/Windows but `Orbita` on macOS, so the
+    name has to be in the set or the macOS build is invisible; AdsPower is next."""
+    assert "orbita" in host.BROWSER_BINARY_NAMES
+    assert "sunbrowser" in host.BROWSER_BINARY_NAMES

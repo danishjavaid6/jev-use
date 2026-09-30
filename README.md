@@ -4,7 +4,9 @@
 
 ```
 browser_profiles   which Chrome is open, and whether CDP works
-browser_open       launch a profile from a private copy, with a CDP endpoint
+browser_open       launch a profile with a CDP endpoint — a Chrome copy, or a
+                   GoLogin profile in its own browser (vendor="gologin")
+browser_close      stop a GoLogin profile that browser_open started, saving it
 browser_use        drive the page toward a goal; Jev picks each action
 browser_extract    ask typed questions about the page, get typed answers
 browser_read       return the page's text so your agent can answer questions
@@ -48,6 +50,10 @@ Supply the key up front with `--key=<key>` instead of being prompted (Windows:
 `install.ps1 -Key <key>`), or export `TYPESAFE_API_KEY` first. It is
 idempotent — running it again repairs rather than reinstalls. Both scripts are
 short enough to read before you run them.
+
+A GoLogin user adds one more flag — `jev-use install --gologin-token=<token>` — which
+saves the token and installs GoLogin's SDK, so `browser_open(vendor="gologin")` can
+start a profile in its own browser. See *GoLogin* below.
 
 **Global install.** `npm install -g <package>` runs the same install through its
 `postinstall`, so a plain global install is enough on a fresh device — then
@@ -177,6 +183,53 @@ Separately, even with a CDP port, Cua's platform matrix lists existing-profile
 attachment as proven for Chrome on Linux X11, macOS, Windows and Sway — **not
 GNOME/Mutter**. That is why the engine is built on the driver's `page` tool with an
 explicit `cdp_port` (see *Why `page`*) rather than on `browser_prepare`.
+
+**GoLogin.** A GoLogin profile is not a Chrome profile, and jev-use does not treat it
+like one: copying a Chrome user-data directory would throw away the fingerprint, proxy
+and cookies that are the whole reason to use GoLogin. Instead jev-use hands the profile
+to **GoLogin's own SDK**, which starts it in its own browser (Orbita) with that identity
+intact, and then attaches to the debug port it returns.
+
+```bash
+jev-use install --gologin-token=<token>   # saves the token, installs the GoLogin SDK
+```
+
+```
+browser_open(profile="Acme Ads", vendor="gologin")   # starts it natively, returns the port
+browser_use(port=54401, goal="check the billing page", act=true)
+browser_close()                                      # stops it, saving cookies + login state
+```
+
+`browser_profiles` lists the account's profiles under **GOLOGIN** once the token is set,
+and with the default `vendor="auto"` a name is resolved as a Chrome profile first and
+falls back to GoLogin. The token is at
+<https://app.gologin.com/#/personalArea/TokenApi>; it is only needed to *launch* — a
+profile already running with a debug port is still found automatically and appears as
+`[gologin] <name> … cdp:yes:<port>`.
+
+**`browser_close` is not optional housekeeping.** The GoLogin SDK commits the profile —
+cookies, local storage, the signed-in state — back to GoLogin *only when it stops*. A
+profile left running loses the session's work, so call `browser_close` when the task is
+done. It does nothing to Chrome profiles; leaving those open is harmless.
+
+The SDK reports to Sentry by default; jev-use sets `DISABLE_TELEMETRY=true` before it
+loads, because you asked it to drive your browser, not to opt you into telemetry.
+
+**The transport.** A GoLogin profile is driven over **browser-harness's CDP client**
+(`cdp-use`) rather than the driver's per-call `page` tool. One WebSocket is held open for
+the session, so a `browser_use` followed by `browser_read` and `browser_extract` pays a
+single handshake instead of three `cua-driver mcp` spawns. `jev-use install
+--gologin-token=<token>` installs it alongside the SDK; without it GoLogin still works,
+over the slower `page` path, and `browser_open` says which one it is using.
+`JEV_USE_TRANSPORT=harness|driver|auto` forces the choice — the default `auto` uses the
+harness for GoLogin/Orbita and leaves a profile-driven Chrome on the path it has always
+used.
+
+The transport deliberately keeps its CDP surface as small as it can, because every domain
+it touches is a signal and every override would damage the identity GoLogin exists to
+provide: it never enables `Runtime` (the documented automation leak), never calls
+`Emulation.*`, and never injects scripts. It only ever *attaches* to a port GoLogin
+opened — it never launches Orbita itself.
 
 ## Use
 
@@ -642,6 +695,11 @@ npm test                 # the installer
   implemented. Typing needs a literal from the caller.
 * **One port per Chrome.** Use a second port for a second profile;
   `browser_profiles` reports what it finds.
+* **GoLogin profiles launch natively, and must be closed to save.** `browser_open`
+  with `vendor="gologin"` starts the profile through GoLogin's SDK (Orbita, its own
+  fingerprint and proxy) and needs a GoLogin API token; `browser_close` then stops it
+  and commits the profile. Other antidetect browsers are attach-only for now: start
+  them with a debug port and pass it to `browser_use(port=...)`.
 * Jev reads literally and is not a calculator — it cannot hold a plan across steps.
   Tasks needing a sequence ("press 7, then multiply, then 8") should be decomposed
   first; that is what the shipping projects do.

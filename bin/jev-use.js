@@ -42,13 +42,26 @@ Usage
 Options
   --key=<key>        The Jev/Typesafe API key. Also read from --jev-key on
                      npm install, or the TYPESAFE_API_KEY environment variable.
+  --gologin-token=<token>
+                     GoLogin API token. Saves it and installs the GoLogin SDK, so
+                     browser_open(vendor="gologin") can start a profile in its own
+                     browser (Orbita) instead of copying a Chrome profile.
+                     https://app.gologin.com/#/personalArea/TokenApi
   --harness=<ids>    Comma-separated harness ids to register with. Default: all
                      detected. Ids come from \`jev-use harnesses\`.
   --print            Print the MCP block instead of writing anything.
 `;
 
 //: Flags that take a value, so `--key sk-abc` works as well as `--key=sk-abc`.
-const VALUE_FLAGS = new Set(['key', 'jev-key', 'api-key', 'port', 'filter', 'harness']);
+const VALUE_FLAGS = new Set([
+  'key',
+  'jev-key',
+  'api-key',
+  'port',
+  'filter',
+  'harness',
+  'gologin-token',
+]);
 
 function parseArgs(argv) {
   const flags = {};
@@ -118,6 +131,7 @@ async function main() {
         force: Boolean(flags.force),
         harness: only,
         key: firstString(flags.key, flags['jev-key'], flags['api-key']),
+        gologinToken: firstString(flags['gologin-token'], flags.gologinToken),
       });
       // Postinstall must not fail `npm install`. An unpickable Python or a
       // blocked download is a "finish this later" state, and the failure is

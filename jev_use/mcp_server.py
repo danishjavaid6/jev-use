@@ -59,6 +59,8 @@ from .profiles import find_profile, local_profiles, start_profile
 from .text_model import TextModel
 
 from . import android as android_engine
+from . import gologin
+from . import harness
 
 SERVER_NAME = "jev-use"
 SERVER_VERSION = "0.3.0"
@@ -102,9 +104,27 @@ def load_env() -> None:
         os.environ.setdefault(key.strip(), value.strip())
 
 
-def attach_helpfully(driver: Driver, profile: str | None = None) -> Any:
-    """Attach to the requested profile (default: the real one), or explain the fix."""
-    return attach(driver, profile=profile)
+def attach_helpfully(
+    driver: Driver, profile: str | None = None, port: int | None = None
+) -> Any:
+    """Attach to the requested profile (default: the real one), or explain the fix.
+
+    An explicit `port` wins over profile matching. It is the one route that reaches
+    a browser discovery cannot see, and the only route that reaches a GoLogin
+    profile: Orbita picks its debug port at launch, so there is nothing to guess.
+    """
+    return attach(driver, port=port, profile=profile)
+
+
+def _port(args: dict[str, Any]) -> int | None:
+    """The optional `port` argument, as an int or None. Never raises on junk."""
+    value = args.get("port")
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 # -- driver sessions --------------------------------------------------------
@@ -114,13 +134,20 @@ def attach_helpfully(driver: Driver, profile: str | None = None) -> Any:
 # and tear all of it down again. A harness that follows browser_use with
 # browser_read and browser_extract pays that three times for one page.
 #
-# This keeps one driver + Target alive and reuses it while it is healthy, and
+# This keeps one transport + Target alive and reuses it while it is healthy, and
 # resets it only when the child process is gone, the requested profile changed, or
-# a call fails. The process is still ours alone, so the unrestricted permission
-# mode it runs under stays contained to a server nothing else can reach.
+# a call fails. Two transports can sit here: a `Driver` (the `page` tool, whose
+# process is ours alone, so the unrestricted permission mode it runs under stays
+# contained) or a `Harness` (browser-harness's CDP client, one websocket, no
+# process at all). `browser._js` routes to whichever it was handed.
 
 _SESSION_LOCK = threading.Lock()
 _SESSION: dict[str, Any] = {"driver": None, "target": None, "profile": None}
+
+#: The GoLogin profile this process started, if any. Held so `browser_close` can
+#: stop it: the SDK commits cookies and login state back to GoLogin on stop, so a
+#: profile that is never stopped loses everything the session did.
+_GOLOGIN: dict[str, Any] = {"session": None}
 
 
 def _close_session_locked() -> None:
@@ -140,9 +167,54 @@ def reset_browser_session() -> None:
         _close_session_locked()
 
 
-def _browser_session(profile: str | None) -> tuple[Driver, Any]:
-    """A live `(driver, target)` for `profile`, reusing the cached one when valid."""
-    key = profile or ""
+def _harness_wanted(port: int | None) -> bool:
+    """Whether this endpoint should be driven over the browser-harness transport.
+
+    `JEV_USE_TRANSPORT` forces the choice (`driver` / `harness`); the default is
+    `auto`, which picks the harness only for an antidetect browser (GoLogin /
+    Orbita). That is the one case where the port is always explicit — the SDK hands
+    it back at launch — so the decision is deterministic, and a Chrome someone
+    drives by profile is left on the path it has always used.
+    """
+    mode = (os.environ.get("JEV_USE_TRANSPORT") or "auto").strip().lower()
+    if mode == "driver":
+        return False
+    if mode == "harness":
+        if not harness.available():
+            raise harness.HarnessError(harness.INSTALL_HINT)
+        return port is not None
+    if port is None or not harness.available():
+        return False
+    session = _GOLOGIN.get("session")
+    if session is not None and session.port == port:
+        return True
+    return any(p.vendor != "chrome" and p.port == port for p in running_profiles())
+
+
+def _start_session(profile: str | None, port: int | None) -> tuple[Any, Any]:
+    """A started transport and its Target — the harness where it applies, else a driver."""
+    if _harness_wanted(port):
+        session = harness.Harness(port=port)  # type: ignore[arg-type]
+        session.start()
+        try:
+            return session, attach(session, port=port, profile=profile)
+        except Exception:
+            session.close()
+            raise
+    driver = Driver()
+    driver.start()
+    try:
+        return driver, attach_helpfully(driver, profile, port)
+    except Exception:
+        driver.close()
+        raise
+
+
+def _browser_session(
+    profile: str | None, port: int | None = None
+) -> tuple[Any, Any]:
+    """A live `(transport, target)` for `profile`/`port`, reusing the cached one when valid."""
+    key = f"{profile or ''}|{port if port is not None else ''}"
     with _SESSION_LOCK:
         driver = _SESSION["driver"]
         if (
@@ -154,25 +226,21 @@ def _browser_session(profile: str | None) -> tuple[Driver, Any]:
             return driver, _SESSION["target"]
 
         _close_session_locked()
-        driver = Driver()
-        driver.start()
-        try:
-            target = attach_helpfully(driver, profile)
-        except Exception:
-            driver.close()
-            raise
-        _SESSION.update(driver=driver, target=target, profile=key)
-        return driver, target
+        session, target = _start_session(profile, port)
+        _SESSION.update(driver=session, target=target, profile=key)
+        return session, target
 
 
-def with_browser_session(profile: str | None, body: Any) -> tuple[Any, Any]:
+def with_browser_session(
+    profile: str | None, body: Any, port: int | None = None
+) -> tuple[Any, Any]:
     """Run `body(driver, target)` on a reused session.
 
     On a DriverError the session is dropped so the next call is fresh, but the
     error is re-raised rather than retried: re-running the body could repeat a
     partial action.
     """
-    driver, target = _browser_session(profile)
+    driver, target = _browser_session(profile, port)
     try:
         return body(driver, target), target
     except DriverError:
@@ -181,6 +249,27 @@ def with_browser_session(profile: str | None, body: Any) -> tuple[Any, Any]:
 
 
 atexit.register(reset_browser_session)
+
+
+def stop_gologin_session() -> None:
+    """Stop the GoLogin profile we started, if any, so its work is committed.
+
+    Registered at exit as well as exposed as `browser_close`. Leaving a GoLogin
+    profile running is not harmless the way leaving Chrome open is: the SDK only
+    writes cookies and login state back to GoLogin when it stops, so a server that
+    exits without stopping it drops the session on the floor.
+    """
+    session = _GOLOGIN.get("session")
+    if session is None:
+        return
+    _GOLOGIN["session"] = None
+    try:
+        session.stop()
+    except Exception:
+        pass
+
+
+atexit.register(stop_gologin_session)
 
 
 def render(result: Any) -> str:
@@ -213,6 +302,10 @@ Follow this order and do not skip steps:
 
    * If a browser is already drivable (`cdp:port`) and it is the profile the user
      meant, use it.
+   * If the user means a GoLogin profile (listed under GOLOGIN), open it with
+     browser_open(profile="<name>", vendor="gologin") — GoLogin starts it in its own
+     browser, not a copied Chrome — then call browser_close when the task is done,
+     because that is what saves its cookies and login state.
    * If nothing is drivable, call browser_open(profile="<name>") with the profile the
      user named — that copies it and launches it with a CDP endpoint. It takes a
      moment and uses disk; say so if the profile is large.
@@ -345,7 +438,10 @@ TOOLS: list[dict[str, Any]] = [
             "endpoint answers) and those that exist on disk but are closed. Call this "
             "FIRST. Pass `only_running: true` for just the running browsers, or "
             "`available: true` for profiles you could open with browser_open. It never "
-            "launches or modifies anything."
+            "launches or modifies anything.\n\n"
+            "Running antidetect browsers (GoLogin/Orbita, shown as [gologin]) appear here "
+            "too when they were started with a debugging port. They cannot be opened with "
+            "browser_open — drive them by passing their port to browser_use."
         ),
         "inputSchema": {
             "type": "object",
@@ -362,32 +458,73 @@ TOOLS: list[dict[str, Any]] = [
     {
         "name": "browser_open",
         "description": (
-            "Open a Chrome profile that exists on disk but is not running, with a CDP "
-            "endpoint, and leave it running for browser_use. Use the display name from "
+            "Open a browser profile that is not running, with a CDP endpoint, and "
+            "leave it running for browser_use. Use the display name from "
             "browser_profiles (e.g. 'Work', 'Outlook 3').\n\n"
-            "This COPIES the profile into a private directory first, because Chrome "
-            "refuses a debugging port on the default data directory. The copy carries "
-            "your cookies, so the logins are there — but it is a SNAPSHOT: signing in "
-            "to the original afterwards does not reach it, so pass refresh=true to "
-            "re-copy. One profile is ~0.5-1.5 GB and the copy happens once."
+            "Two kinds of profile, chosen by `vendor`:\n\n"
+            "* **A Chrome profile** (default) is COPIED into a private directory first, "
+            "because Chrome refuses a debugging port on the default data directory. "
+            "The copy carries your cookies, so the logins are there — but it is a "
+            "SNAPSHOT: signing in to the original afterwards does not reach it, so pass "
+            "refresh=true to re-copy. One profile is ~0.5-1.5 GB, copied once.\n\n"
+            "* **A GoLogin profile** (`vendor=\"gologin\"`) is NOT copied. GoLogin starts "
+            "it in its own browser (Orbita) with its fingerprint, proxy and cookies "
+            "intact, and this returns the port it came up on. This needs a GoLogin API "
+            "token (`jev-use install --gologin-token=<token>`). It can take a while: "
+            "GoLogin downloads the profile, and Orbita the first time. Call browser_close "
+            "when the task is done so GoLogin saves the profile.\n\n"
+            "With the default vendor=\"auto\", a name is looked up as a Chrome profile "
+            "first and falls back to GoLogin only when there is no Chrome profile by "
+            "that name."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "profile": {
                     "type": "string",
-                    "description": "Display name or directory of the profile to open.",
+                    "description": "Display name (or id) of the profile to open.",
                 },
-                "port": {"type": "integer", "default": 9222},
+                "vendor": {
+                    "type": "string",
+                    "enum": ["auto", "chrome", "gologin"],
+                    "default": "auto",
+                    "description": (
+                        "'chrome' copies and launches a Chrome profile; 'gologin' starts "
+                        "a GoLogin profile in its own browser; 'auto' tries Chrome first."
+                    ),
+                },
+                "port": {
+                    "type": "integer",
+                    "description": (
+                        "Explicit CDP port to launch on. Default 9222 for Chrome; for "
+                        "GoLogin, omit to let it choose (recommended — its port is free)."
+                    ),
+                },
                 "url": {"type": "string", "description": "Page to open. Default about:blank."},
+                "headless": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "GoLogin only: start Orbita without a visible window.",
+                },
                 "refresh": {
                     "type": "boolean",
                     "default": False,
-                    "description": "Re-copy the profile, picking up logins made since the last copy.",
+                    "description": "Chrome only: re-copy the profile, picking up logins made since the last copy.",
                 },
             },
             "required": ["profile"],
         },
+    },
+    {
+        "name": "browser_close",
+        "description": (
+            "Stop the GoLogin profile that browser_open started, saving its cookies and "
+            "login state back to GoLogin. Call this when the task is done: the GoLogin "
+            "SDK only commits the profile on stop, so a profile left running loses what "
+            "the session did. It does nothing to Chrome profiles (leaving those open is "
+            "harmless)."
+        ),
+        "inputSchema": {"type": "object", "properties": {}},
     },
     {
         "name": "browser_use",
@@ -426,7 +563,12 @@ TOOLS: list[dict[str, Any]] = [
                 },
                 "port": {
                     "type": "integer",
-                    "description": "Explicit CDP port. Omit to auto-detect.",
+                    "description": (
+                        "Explicit CDP port, overriding profile matching. Use this for a "
+                        "browser discovery cannot see: a GoLogin/Orbita profile is started "
+                        "with a debugging port by the GoLogin app/SDK (which returns the "
+                        "port), as are other antidetect browsers. Omit to auto-detect."
+                    ),
                 },
                 "profile": {
                     "type": "string",
@@ -547,6 +689,12 @@ TOOLS: list[dict[str, Any]] = [
                 "profile": {
                     "type": "string",
                     "description": "Which browser profile to read, as in browser_use.",
+                },
+                "port": {
+                    "type": "integer",
+                    "description": (
+                        "Explicit CDP port to read, as in browser_use. Wins over `profile`."
+                    ),
                 },
             },
             "required": ["urls"],
@@ -671,6 +819,47 @@ TOOLS: list[dict[str, Any]] = [
 ]
 
 
+def _gologin_lines(filter_text: str) -> list[str]:
+    """The GoLogin section of browser_profiles, or an empty list.
+
+    A GoLogin profile is listed here rather than under AVAILABLE because it is not
+    a Chrome profile: it opens in its own browser, not through browser_open's copy.
+    Listing needs the API token, since GoLogin profiles live on the account; without
+    one we only say that GoLogin is present and how to enable it.
+    """
+    if not gologin.token():
+        from . import host
+
+        root = host.gologin_browser_root()
+        if root.exists():
+            return [
+                "",
+                f"GOLOGIN — GoLogin is installed ({root}) but no API token is set.",
+                "  Add one to open its profiles in their own browser:",
+                "    jev-use install --gologin-token=<token>",
+            ]
+        return []
+
+    try:
+        found = gologin.profiles()
+    except gologin.GoLoginError as exc:
+        return ["", f"GOLOGIN — {exc}"]
+
+    if filter_text:
+        found = [p for p in found if filter_text in p.name.lower()]
+    lines = [
+        "",
+        f"GOLOGIN ({len(found)} profiles; each runs in its own browser, not Chrome)",
+    ]
+    if not found:
+        lines.append("  (none match)")
+    for profile in found:
+        lines.append(f"  {profile.describe()}")
+    lines.append('')
+    lines.append('Open one with browser_open(profile="<name>", vendor="gologin").')
+    return lines
+
+
 def tool_browser_profiles(args: dict[str, Any]) -> str:
     """Running browsers and on-disk profiles, one line each."""
     filter_text = (args.get("filter") or "").lower()
@@ -704,10 +893,17 @@ def tool_browser_profiles(args: dict[str, Any]) -> str:
                     label = f"{source.name!r} ({source.directory}) open from a copy"
             lines.append("  " + label + suffix)
         if not usable:
-            lines.append(
-                "  (none drivable — a running Chrome cannot expose CDP on its default "
-                "profile; use browser_open to launch a profile from its own copy)"
-            )
+            if any(p.vendor == "gologin" for p in running.values()):
+                lines.append(
+                    "  (none drivable — a GoLogin/Orbita profile exposes CDP only when it "
+                    "is started with a debugging port; start it through the GoLogin app/SDK "
+                    "and pass the port it returns to browser_use)"
+                )
+            else:
+                lines.append(
+                    "  (none drivable — a running Chrome cannot expose CDP on its default "
+                    "profile; use browser_open to launch a profile from its own copy)"
+                )
         if args.get("only_running"):
             return "\n".join(lines)
 
@@ -717,15 +913,17 @@ def tool_browser_profiles(args: dict[str, Any]) -> str:
         try:
             profiles = local_profiles()
         except FileNotFoundError as exc:
+            # No Chrome at all is not the end of the report: a GoLogin user still
+            # wants to see their profiles, so the section below is reached either way.
+            profiles = []
             lines.append(f"\n{exc}")
-            return "\n".join(lines)
 
         if filter_text:
             profiles = [
                 p for p in profiles if filter_text in p.name.lower() or filter_text in p.directory.lower()
             ]
         lines.append("")
-        lines.append(f"AVAILABLE ({len(profiles)} profiles on disk)")
+        lines.append(f"AVAILABLE ({len(profiles)} Chrome profiles on disk)")
         if not profiles:
             lines.append("  (none match)")
         for profile in profiles:
@@ -736,16 +934,73 @@ def tool_browser_profiles(args: dict[str, Any]) -> str:
         lines.append('')
         lines.append('Open one with browser_open(profile="<name>").')
 
+        lines += _gologin_lines(filter_text)
+
     return "\n".join(lines)
+
+
+def _open_gologin(wanted: str, args: dict[str, Any]) -> str:
+    """Launch a GoLogin profile in its own browser and report the CDP port."""
+    try:
+        match = gologin.find(wanted)
+    except gologin.GoLoginError as exc:
+        return str(exc)
+
+    existing = _GOLOGIN.get("session")
+    if existing is not None and existing.profile.id == match.id and cdp_alive(existing.port):
+        return f"GoLogin profile {match.name!r} is already open and drivable on port {existing.port}."
+
+    url = str(args.get("url") or "").strip()
+    try:
+        session = gologin.launch(
+            match,
+            port=_port(args),
+            url=None if url in ("", "about:blank") else url,
+            headless=bool(args.get("headless", False)),
+        )
+    except gologin.GoLoginError as exc:
+        return str(exc)
+
+    _GOLOGIN["session"] = session
+    transport = (
+        "browser-harness CDP transport (one websocket, no per-call driver spawn)"
+        if harness.available()
+        else "the cua-driver `page` tool; install the harness for the faster path:\n"
+        "    pip install 'jev-use[harness]'"
+    )
+    return (
+        f"opened GoLogin profile {match.name!r} ({match.id}) in its own browser on "
+        f"port {session.port}\n"
+        "  this is the profile's real identity — fingerprint, proxy and cookies "
+        "intact, not a copied Chrome profile.\n"
+        f"  driving over: {transport}\n"
+        f"  browser_use(port={session.port}) or browser_use(profile={match.name!r}) "
+        "can attach now.\n"
+        "  Call browser_close when the task is done, to stop it and save the profile."
+    )
 
 
 def tool_browser_open(args: dict[str, Any]) -> str:
     wanted = args["profile"]
+    vendor = str(args.get("vendor") or "auto").lower()
     port = int(args.get("port", 9222))
-    try:
-        match = find_profile(wanted)
-    except (ValueError, FileNotFoundError) as exc:
-        return str(exc)
+
+    # Chrome first for "auto": a name that matches both must keep selecting Chrome,
+    # which is what it did before GoLogin existed.
+    match = None
+    problem = ""
+    if vendor in ("auto", "chrome"):
+        try:
+            match = find_profile(wanted)
+        except (ValueError, FileNotFoundError) as exc:
+            problem = str(exc)
+            if vendor == "chrome":
+                return problem
+
+    if match is None:
+        if vendor == "gologin" or (vendor == "auto" and gologin.token()):
+            return _open_gologin(wanted, args)
+        return problem or f"no profile matches {wanted!r}"
 
     if match.port and cdp_alive(match.port):
         return f"{match.name!r} is already open and drivable on port {match.port}."
@@ -765,6 +1020,23 @@ def tool_browser_open(args: dict[str, Any]) -> str:
         f"  copy: {workdir}\n"
         f"  logins come from the copy, taken at copy time.\n"
         f"  browser_use(profile={profile.directory!r}) can attach now."
+    )
+
+
+def tool_browser_close(args: dict[str, Any]) -> str:
+    """Stop the GoLogin profile this server started, committing its state."""
+    reset_browser_session()
+    session = _GOLOGIN.get("session")
+    if session is None:
+        return "no GoLogin profile was started by this server, so there is nothing to close."
+    _GOLOGIN["session"] = None
+    try:
+        session.stop()
+    except Exception as exc:  # noqa: BLE001 - report whatever the SDK raises
+        return f"could not stop the GoLogin profile {session.profile.name!r}: {exc}"
+    return (
+        f"stopped GoLogin profile {session.profile.name!r}; its cookies and login "
+        "state are saved back to GoLogin."
     )
 
 
@@ -794,7 +1066,7 @@ def tool_browser_use(args: dict[str, Any]) -> str:
             cache=PlanCache(CACHE_PATH) if args.get("use_cache", True) else None,
         )
 
-    result, target = with_browser_session(args.get("profile"), body)
+    result, target = with_browser_session(args.get("profile"), body, _port(args))
     return f"port={target.port} pid={target.pid}\n" + render(result)
 
 
@@ -805,7 +1077,9 @@ def tool_browser_extract(args: dict[str, Any]) -> str:
     if text is None:
         try:
             text, _ = with_browser_session(
-                args.get("profile"), lambda driver, target: browser_read(driver, target)
+                args.get("profile"),
+                lambda driver, target: browser_read(driver, target),
+                _port(args),
             )
         except DriverError as exc:
             return str(exc)
@@ -836,7 +1110,9 @@ def tool_browser_extract(args: dict[str, Any]) -> str:
 
 def tool_browser_read(args: dict[str, Any]) -> str:
     text, target = with_browser_session(
-        args.get("profile"), lambda driver, target: browser_read(driver, target)
+        args.get("profile"),
+        lambda driver, target: browser_read(driver, target),
+        _port(args),
     )
     if not text:
         return "(the page returned no visible text)"
@@ -849,10 +1125,17 @@ def tool_browser_read_many(args: dict[str, Any]) -> str:
         return "no urls given"
     concurrency = max(1, min(int(args.get("concurrency", DEFAULT_READ_CONCURRENCY)), 8))
     try:
-        # The shared session supplies the port/window; the batch spawns its own
-        # driver per worker, because one driver serialises its calls.
-        _driver, target = _browser_session(args.get("profile"))
-        results = browser_read_many(target, urls, concurrency=concurrency)
+        # The shared session supplies the port/window; the batch builds its own
+        # transport per worker, because one transport serialises its calls.
+        session, target = _browser_session(args.get("profile"), _port(args))
+        new_driver = (
+            (lambda: harness.Harness(port=target.port))
+            if isinstance(session, harness.Harness)
+            else None
+        )
+        results = browser_read_many(
+            target, urls, concurrency=concurrency, new_driver=new_driver
+        )
     except DriverError as exc:
         return str(exc)
     blocks = [f"url={url}\n{text[:20000]}" for url, text in results]
@@ -947,6 +1230,7 @@ def tool_android_location(args: dict[str, Any]) -> str:
 HANDLERS = {
     "browser_profiles": tool_browser_profiles,
     "browser_open": tool_browser_open,
+    "browser_close": tool_browser_close,
     "browser_use": tool_browser_use,
     "browser_extract": tool_browser_extract,
     "browser_read": tool_browser_read,

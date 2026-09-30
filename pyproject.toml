@@ -7,6 +7,18 @@ dependencies = []
 
 [project.optional-dependencies]
 live = ["typesafe-sdk"]
+# The official GoLogin SDK: it launches a GoLogin profile in its original form
+# (Orbita, its fingerprint, proxy and cookies) and returns the CDP address, which
+# is what `browser_open(vendor="gologin")` drives. Optional because it is only
+# needed by someone who actually uses GoLogin, and it pulls requests + psutil.
+gologin = ["gologin"]
+# browser-harness's transport: `cdp-use` holds ONE CDP websocket for the whole
+# session instead of spawning a `cua-driver mcp` process per browser call, which is
+# what `browser_use` -> `browser_read` -> `browser_extract` currently pays three
+# times. We use the client directly rather than browser-harness's daemon because
+# this MCP server is already a single long-lived process — see jev_use/harness.py.
+# Installing `browser-harness` instead works too: it depends on the same client.
+harness = ["cdp-use"]
 dev = ["pytest>=8"]
 
 [project.scripts]

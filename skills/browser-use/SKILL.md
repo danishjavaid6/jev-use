@@ -17,6 +17,13 @@ DOM element; you describe a destination.
 profiles on disk, by their real names.
 
 * Something already drivable (`cdp:port`) that matches what the user meant → use it.
+* A **GoLogin** profile (listed under `GOLOGIN`) is not a Chrome profile and must never
+  be copied. Open it in its own browser with
+  `browser_open(profile="<name>", vendor="gologin")` — GoLogin's SDK starts it with its
+  fingerprint, proxy and cookies intact and returns the port. Then call `browser_close`
+  when the task is done: that is what saves its cookies and login state.
+* A GoLogin/Orbita browser already running with a debug port (`[gologin] … cdp:yes:N`)
+  can be driven directly with `browser_use(port=N)` — no need to open it again.
 * Nothing drivable → `browser_open(profile="<name>")`. That copies the profile into a
   private directory and launches it with a CDP endpoint. Warn if the profile is large
   (0.5–1.5 GB); the copy is made once and reused.
@@ -92,6 +99,11 @@ Cloudflare R2 billing — could not reach: the page redirected to a product
 ## When it will not work
 
 * **No CDP endpoint.** `browser_open` opens one from a copy.
+* **GoLogin needs a token.** `browser_open(vendor="gologin")` needs a GoLogin API token
+  (`jev-use install --gologin-token=<token>`); without one, only GoLogin browsers that
+  are already running with a debug port are usable. Never copy a GoLogin profile into
+  Chrome — that discards the fingerprint that makes it a GoLogin profile. And always
+  `browser_close` a GoLogin profile you opened, or its cookies are not saved.
 * **An expired session.** There is no generic way to log in — the server can fill
   fields only when a text model is configured and the goal supplies the value. If a
   login wall appears, say so.
