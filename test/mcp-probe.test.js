@@ -75,6 +75,6 @@ test('real Node-to-Python launcher discovers browser and mobile tools outside pr
     const registered = { command: commandcode.quoteWindows(real.command), args: real.args.map(commandcode.quoteWindows) };
     const shellResult = await probe(registered, { shell: true, cwd: os.tmpdir() });
     assert.equal(shellResult.ok, true, shellResult.error);
-    assert.equal(shellResult.tools.length, 12);
+    assert.equal(shellResult.tools.length, 13);
   }
 });
