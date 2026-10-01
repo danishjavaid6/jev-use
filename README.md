@@ -92,9 +92,11 @@ does not ask Jev to choose every click. Install BetterWright once with
 process that launches GoLogin. BetterWright only attaches to that browser; call
 `browser_close` afterward so GoLogin saves the profile.
 
-Scripts dismiss recognized cookie and promotional overlays by default. They do
-not click generic `Close` buttons, because an account chooser or login dialog
-may be task-critical. Handle those with an exact locator; prepare
+Scripts dismiss recognized cookie/promotional overlays and Facebook's `Sign in
+as` chooser by clicking its scoped `Close` button and verifying it disappears.
+Use `dismiss_overlays=false` to keep the chooser open. Password forms and other
+dialogs stay open. Browser-owned credential popups outside the page DOM require
+manual dismissal; do not repeat clicks behind them. Prepare
 `dialogs.dismissNext()` or `dialogs.acceptNext()` immediately before a native
 JavaScript dialog action.
 

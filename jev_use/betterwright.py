@@ -22,6 +22,22 @@ class BetterWrightError(RuntimeError):
     """A BetterWright attachment or snippet failure."""
 
 
+DISMISS_OVERLAYS_JS = """\
+await overlays.dismiss();
+// Close only the Facebook 'Sign in as' chooser requested by the user.
+// Never click an unrelated Close button or dismiss the password form.
+if (/^https:\\/\\/(?:[^/]+\\.)?facebook\\.com(?:\\/|$)/i.test(page.url())) {
+    const chooser = page.locator('[role="dialog"], dialog').filter({
+        has: page.getByText('Sign in as', { exact: true })
+    });
+    if (await chooser.count() === 1 && await chooser.isVisible()) {
+        await chooser.getByRole('button', { name: 'Close', exact: true }).click();
+        await chooser.waitFor({ state: 'hidden', timeout: 5000 });
+    }
+}
+"""
+
+
 INSTALL_HINT = (
     "BetterWright is not installed. Install it once with:\n"
     "    bun install -g betterwright\n"

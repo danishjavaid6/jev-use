@@ -34,9 +34,16 @@ Do not operate the same page the user is actively editing.
    selectors are unknown, then write the script and run it. Do not switch to
    agent-browser for the same page. Install it once with
    `bun install -g betterwright` and verify the script result.
-   `browser_script` dismisses recognized cookie/promotional overlays by default;
-   it does not click generic `Close` buttons, because Facebook account choosers
-   and login dialogs are task-critical. Handle those with an exact locator. For
+   `browser_script` dismisses recognized cookie/promotional overlays and the
+   Facebook `Sign in as` chooser shown with a `Close` button by default. It
+   verifies that the chooser disappears before running the script. Set
+   `dismiss_overlays=false` to keep it open. Password forms and unrelated dialogs
+   stay open. If this popup appears midway through a script, repeat the same
+   scoped dialog close and wait for it to disappear before continuing.
+   Browser-owned credential popups may be absent from the page DOM. If a
+   screenshot shows a blocking popup but the dialog locator finds nothing,
+   stop and request manual dismissal; never repeatedly click behind the popup.
+   For
    native JavaScript dialogs, prepare `dialogs.dismissNext()` or
    `dialogs.acceptNext()` immediately before the action that opens the dialog.
    When the MCP server is loaded, call `browser_script` directly. Do not run

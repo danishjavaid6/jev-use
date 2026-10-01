@@ -528,8 +528,9 @@ TOOLS: list[dict[str, Any]] = [
                     "type": "boolean",
                     "default": True,
                     "description": (
-                        "Dismiss recognized cookie/promotional overlays before the "
-                        "script. Task-critical dialogs such as account choosers are untouched."
+                        "Dismiss recognized cookie/promotional overlays and the "
+                        "Facebook 'Sign in as' chooser before the script. Password "
+                        "and unrelated dialogs are untouched."
                     ),
                 },
             },
@@ -1049,10 +1050,7 @@ def tool_browser_script(args: dict[str, Any]) -> str:
     reset_browser_session()
     code = str(args.get("code") or "")
     if args.get("dismiss_overlays", True):
-        # BetterWright only dismisses overlays it classifies as cookie or
-        # promotional. It will not click a generic Close button, which is
-        # important for Facebook's task-critical account chooser.
-        code = "try { await overlays.dismiss(); } catch (_) {}\n" + code
+        code = betterwright.DISMISS_OVERLAYS_JS + code
     try:
         result = betterwright.run_script(
             port,
