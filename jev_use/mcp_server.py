@@ -1031,6 +1031,14 @@ def tool_browser_script(args: dict[str, Any]) -> str:
         if chosen is None or chosen.port is None:
             return problem or "no running CDP browser matched the requested profile"
         port = chosen.port
+    # The normal MCP path keeps one cdp-use websocket alive for fast repeated
+    # browser_* calls. BetterWright needs to own the endpoint while its Playwright
+    # worker runs; release our connection first so the two transports do not race
+    # over the same Orbita target. This only detaches from CDP — it does not close
+    # GoLogin or the browser, and the next browser_* call reconnects automatically.
+    if betterwright.executable() is None:
+        return betterwright.INSTALL_HINT
+    reset_browser_session()
     try:
         result = betterwright.run_script(
             port,
