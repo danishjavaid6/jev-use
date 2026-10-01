@@ -65,7 +65,11 @@ function Test-Node {
     Fail 'npm not found — it ships with Node; install Node 18+ and re-run.'
   }
   $major = 0
-  try { $major = [int](node -p 'process.versions.node.split(".")[0]') } catch { $major = 0 }
+  # Avoid nested quotes here: PowerShell's native-command argument handling
+  # strips the inner quotes before Node sees them (`split(.)`), which makes a
+  # valid Node 22 install look too old. Parsing the semver string directly has
+  # no quoting-sensitive JavaScript.
+  try { $major = [int](node -p 'parseInt(process.versions.node, 10)') } catch { $major = 0 }
   if ($major -lt 18) {
     Fail "node $(node -v) is too old — jev-use needs Node 18 or newer."
   }
