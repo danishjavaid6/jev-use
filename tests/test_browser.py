@@ -1093,6 +1093,7 @@ def test_surface_is_browser_and_android_only() -> None:
         "browser_open",
         "browser_close",
         "browser_use",
+        "browser_action",
         "browser_extract",
         "browser_read",
         "browser_read_many",

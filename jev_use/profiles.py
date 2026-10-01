@@ -138,9 +138,9 @@ def _cdp_alive(port: int, timeout: float = 1.5) -> bool:
         return False
 
 
-def local_profiles() -> list[LocalProfile]:
+def local_profiles(*, inspect_running: bool = True) -> list[LocalProfile]:
     """Every profile Chrome knows about, with its display name and state."""
-    running, ports = _running_with_port()
+    running, ports = _running_with_port() if inspect_running else (set(), {})
     profiles: list[LocalProfile] = []
     for directory, meta in sorted(_read_info_cache().items()):
         name = (meta or {}).get("name") or directory
@@ -160,6 +160,11 @@ def local_profiles() -> list[LocalProfile]:
                 LocalProfile(directory=path.name, name=path.name, prepared=False)
             )
     return profiles
+
+
+def profile_registry() -> list[LocalProfile]:
+    """Disk metadata only. MCP already takes its own running-browser snapshot."""
+    return local_profiles(inspect_running=False)
 
 
 def find_profile(wanted: str) -> LocalProfile:

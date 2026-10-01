@@ -7,7 +7,7 @@ from . import mcp_server
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("tool", choices=list(mcp_server.HANDLERS))
-    for name in ("profile", "url", "goal", "serial", "vendor"):
+    for name in ("profile", "url", "goal", "serial", "vendor", "action", "label", "text"):
         parser.add_argument("--" + name)
     parser.add_argument("--port", type=int)
     parser.add_argument("--act", action="store_true", default=None)

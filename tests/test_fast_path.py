@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 from jev_use import browser, host, mcp_server, tool_cli
 from jev_use import profiles
+from jev_use import actions
 import pytest
 
 
@@ -75,3 +76,44 @@ def test_background_tab_is_pinned_by_id_without_activation():
     attach = next(params for method, params, _ in fake.calls if method == "Target.attachToTarget")
     assert attach["targetId"] == "T2"
     assert not any(method in ("Target.activateTarget", "Page.bringToFront") for method, _, _ in fake.calls)
+
+
+def test_exact_action_refuses_duplicate_labels(monkeypatch):
+    page = browser.Target(port=9333, pid=0, window_id=0)
+    view = browser.Observation(page, {"elements": [
+        {"ref": 1, "text": "Save", "tag": "button"},
+        {"ref": 2, "text": "Save", "tag": "button"},
+    ]})
+    monkeypatch.setattr(browser, "snapshot", lambda *a, **kw: view)
+    monkeypatch.setattr(browser, "click", lambda *a: pytest.fail("ambiguous action must not click"))
+    with pytest.raises(browser.DriverError, match="2 controls"):
+        actions.perform(object(), page, "click", "Save")
+
+
+def test_exact_fill_uses_literal_text_without_a_model(monkeypatch):
+    page = browser.Target(port=9333, pid=0, window_id=0)
+    view = browser.Observation(page, {"elements": [
+        {"ref": 1, "text": "Email", "tag": "input", "fillable": True},
+    ]}, can_write=True)
+    seen = []
+    monkeypatch.setattr(browser, "snapshot", lambda *a, **kw: view)
+    monkeypatch.setattr(browser, "type_into", lambda d, t, ref, value: seen.append((ref, value)))
+    monkeypatch.setattr(browser, "read", lambda *a: "Form updated")
+    out = actions.perform(object(), page, "fill", "Email", "user@example.com")
+    assert seen == [("1", "user@example.com")]
+    assert "Form updated" in out
+
+
+def test_unavailable_planner_does_not_read_before_browser_decision(monkeypatch):
+    from jev_use.choosers import MockChooser
+    page = browser.Target(port=9333, pid=0, window_id=0)
+    monkeypatch.setattr(browser, "snapshot", lambda *a, **kw: browser.Observation(page, {"elements": []}))
+    monkeypatch.setattr(browser, "read", lambda *a: pytest.fail("unavailable planner must not read"))
+    result = browser.run(object(), page, "goal", MockChooser(script=[{"kind": "done"}]), writer=SimpleNamespace(available=False), decompose=True)
+    assert result.outcome == "done"
+
+
+def test_registry_does_not_scan_windows_processes(monkeypatch):
+    monkeypatch.setattr(profiles, "_running_with_port", lambda: pytest.fail("disk registry must not scan processes"))
+    monkeypatch.setattr(profiles, "_read_info_cache", lambda: {"Default": {"name": "Main"}})
+    assert profiles.profile_registry()[0].name == "Main"

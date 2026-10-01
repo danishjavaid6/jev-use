@@ -16,6 +16,8 @@
     "bin",
     "lib",
     "jev_use/*.py",
+    "!jev_use/cli.py",
+    "!jev_use/loop.py",
     "skills",
     "scripts/enable-cdp.sh",
     "scripts/enable-cdp.ps1",

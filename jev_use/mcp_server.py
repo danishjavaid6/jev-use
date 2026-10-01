@@ -55,7 +55,7 @@ from .cache import PlanCache
 from .driver import Driver, DriverError
 from .extract import ExtractError, ask as extract_ask
 from pathlib import Path
-from .profiles import find_profile, local_profiles, start_profile
+from .profiles import find_profile, profile_registry as local_profiles, start_profile
 from .text_model import TextModel
 
 from . import android as android_engine
@@ -294,7 +294,8 @@ PROMPT_NAME = "browser-use"
 PROMPT_TEMPLATE = """Task: {task}
 Call browser_profiles once; reuse the matching port or browser_open the requested profile.
 For a known URL use browser_read(port=N, url=...) directly. For several URLs use
-browser_read_many. Use browser_use only for interactions, then read to verify.
+browser_read_many. For one exact click/fill/scroll use browser_action; for ambiguous
+or multi-step goals use browser_use with Jev, then read to verify.
 Never substitute a different browser for a requested account. GoLogin needs
 vendor=\"gologin\" and browser_close afterward.
 If tools are missing, search once then use `jev-use call <tool>` in the shell.
@@ -395,17 +396,11 @@ TOOLS: list[dict[str, Any]] = [
                     "type": "string",
                     "enum": ["auto", "chrome", "gologin"],
                     "default": "auto",
-                    "description": (
-                        "'chrome' copies and launches a Chrome profile; 'gologin' starts "
-                        "a GoLogin profile in its own browser; 'auto' tries Chrome first."
-                    ),
+                    "description": "Chrome snapshot or native GoLogin; auto tries Chrome first.",
                 },
                 "port": {
                     "type": "integer",
-                    "description": (
-                        "Explicit CDP port to launch on. Default 9222 for Chrome; for "
-                        "GoLogin, omit to let it choose (recommended — its port is free)."
-                    ),
+                    "description": "CDP port; use the port returned by browser_open.",
                 },
                 "url": {"type": "string", "description": "Page to open. Default about:blank."},
                 "headless": {
@@ -457,43 +452,39 @@ TOOLS: list[dict[str, Any]] = [
                 },
                 "port": {
                     "type": "integer",
-                    "description": (
-                        "Explicit CDP port, overriding profile matching. Use this for a "
-                        "browser discovery cannot see: a GoLogin/Orbita profile is started "
-                        "with a debugging port by the GoLogin app/SDK (which returns the "
-                        "port), as are other antidetect browsers. Omit to auto-detect."
-                    ),
+                    "description": "CDP port; use the port returned by browser_open.",
                 },
                 "profile": {
                     "type": "string",
-                    "description": (
-                        "Which browser profile to drive, matched as a substring of its "
-                        "directory (e.g. 'google-chrome'). Defaults to the user's real "
-                        f"profile ({DEFAULT_PROFILE.name}); attaching to a different "
-                        "browser than the one asked for is refused, not silently done."
-                    ),
+                    "description": "Profile name; explicit port wins.",
                 },
                 "use_cache": {
                     "type": "boolean",
                     "default": True,
-                    "description": (
-                        "Replay a plan that already succeeded for this page and goal, "
-                        "skipping Jev entirely: one snapshot, zero model calls. A plan "
-                        "that no longer resolves is dropped and re-planned."
-                    ),
+                    "description": "Reuse a successful plan; stale plans are re-decided.",
                 },
                 "decompose": {
                     "type": "boolean",
                     "default": True,
-                    "description": (
-                        "Split a compound goal into ordered subgoals before acting. "
-                        "Jev decides one step at a time and cannot hold a plan, so this "
-                        "is the accuracy fix for anything sequential. Needs a text "
-                        "model; without one the goal is used unchanged."
-                    ),
+                    "description": "Plan multi-step goals when a text model is configured.",
                 },
             },
             "required": ["goal"],
+        },
+    },
+    {
+        "name": "browser_action",
+        "description": "One exact action, then return page text. No Jev call. Click/fill require a unique visible label; for ambiguous controls use browser_use.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["click", "fill", "scroll_down", "scroll_up", "back"]},
+                "label": {"type": "string", "description": "Exact visible control label for click/fill."},
+                "text": {"type": "string", "description": "Literal value for fill."},
+                "port": {"type": "integer"},
+                "profile": {"type": "string"},
+            },
+            "required": ["action"],
         },
     },
     {
@@ -552,15 +543,14 @@ TOOLS: list[dict[str, Any]] = [
                     "default": DEFAULT_READ_CONCURRENCY,
                     "description": "How many tabs to read at once (1-8).",
                 },
+                "max_chars": {"type": "integer", "default": 6000, "description": "Text limit per page, up to 20000."},
                 "profile": {
                     "type": "string",
                     "description": "Which browser profile to read, as in browser_use.",
                 },
                 "port": {
                     "type": "integer",
-                    "description": (
-                        "Explicit CDP port to read, as in browser_use. Wins over `profile`."
-                    ),
+                    "description": "CDP port; use the port returned by browser_open.",
                 },
             },
             "required": ["urls"],
@@ -580,10 +570,7 @@ TOOLS: list[dict[str, Any]] = [
                 "goal": {"type": "string", "description": "What to accomplish on the phone."},
                 "serial": {
                     "type": "string",
-                    "description": (
-                        "Which device, from android_devices. Required when more than one "
-                        "is attached; guessing is refused rather than done."
-                    ),
+                    "description": "Device serial; required for multiple devices.",
                 },
                 "act": {
                     "type": "boolean",
@@ -604,18 +591,12 @@ TOOLS: list[dict[str, Any]] = [
                 "use_cache": {
                     "type": "boolean",
                     "default": True,
-                    "description": (
-                        "Replay a plan that already succeeded on this same screen and "
-                        "goal, skipping Jev entirely."
-                    ),
+                    "description": "Reuse a successful plan; stale plans are re-decided.",
                 },
                 "decompose": {
                     "type": "boolean",
                     "default": True,
-                    "description": (
-                        "Split a compound goal into ordered subgoals first. Needs a text "
-                        "model; without one the goal is used unchanged."
-                    ),
+                    "description": "Plan multi-step goals when a text model is configured.",
                 },
             },
             "required": ["goal"],
@@ -705,9 +686,10 @@ def tool_browser_profiles(args: dict[str, Any]) -> str:
     if not args.get("available"):
         lines = ["RUNNING"] if running else []
         usable = 0
-        from .profiles import WORK_ROOT, local_profiles as _locals
+        from .profiles import WORK_ROOT
 
-        by_slug = {p.workdir.name: p for p in _locals()}
+        disk_profiles = local_profiles()
+        by_slug = {p.workdir.name: p for p in disk_profiles}
         for profile in running.values():
             if profile.port is None:
                 suffix = ""
@@ -720,7 +702,7 @@ def tool_browser_profiles(args: dict[str, Any]) -> str:
             if str(WORK_ROOT) in profile.profile_dir:
                 source = by_slug.get(Path(profile.profile_dir).name)
                 if source:
-                    label = f"{source.name!r} ({source.directory}) open from a copy"
+                    label = f"{source.name!r} ({source.directory}) open from a copy cdp={'yes:' + str(profile.port) if profile.port else 'no'}"
             lines.append("  " + label + suffix)
         if not usable:
             if any(p.vendor == "gologin" for p in running.values()):
@@ -741,7 +723,7 @@ def tool_browser_profiles(args: dict[str, Any]) -> str:
     lines = lines if not args.get("available") else []
     if not args.get("only_running"):
         try:
-            profiles = local_profiles()
+            profiles = disk_profiles if not args.get("available") else local_profiles()
         except FileNotFoundError as exc:
             # No Chrome at all is not the end of the report: a GoLogin user still
             # wants to see their profiles, so the section below is reached either way.
@@ -902,6 +884,16 @@ def tool_browser_use(args: dict[str, Any]) -> str:
     return f"port={target.port} pid={target.pid}\n" + render(result)
 
 
+def tool_browser_action(args: dict[str, Any]) -> str:
+    from .actions import perform
+    output, _ = with_browser_session(
+        args.get("profile"),
+        lambda session, page: perform(session, page, args["action"], args.get("label", ""), args.get("text")),
+        _port(args),
+    )
+    return output
+
+
 def tool_browser_extract(args: dict[str, Any]) -> str:
     questions = args.get("questions") or {}
     text = args.get("text")
@@ -983,7 +975,8 @@ def tool_browser_read_many(args: dict[str, Any]) -> str:
         )
     except DriverError as exc:
         return str(exc)
-    blocks = [f"url={url}\n{text[:20000]}" for url, text in results]
+    limit = max(500, min(int(args.get("max_chars", 6000)), 20000))
+    blocks = [f"url={url}\n{text[:limit]}" for url, text in results]
     header = f"{len(results)} page(s), {concurrency} at a time"
     return header + "\n\n" + "\n\n---\n\n".join(blocks)
 
@@ -1077,6 +1070,7 @@ HANDLERS = {
     "browser_open": tool_browser_open,
     "browser_close": tool_browser_close,
     "browser_use": tool_browser_use,
+    "browser_action": tool_browser_action,
     "browser_extract": tool_browser_extract,
     "browser_read": tool_browser_read,
     "browser_read_many": tool_browser_read_many,

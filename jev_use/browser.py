@@ -87,9 +87,9 @@ TABLE_JS = r"""
     if (r.bottom < 0 || r.top > innerHeight) continue;
     const style = getComputedStyle(e);
     if (style.visibility === 'hidden' || style.display === 'none') continue;
-    const text = (e.innerText || e.value || e.getAttribute('aria-label')
+    const text = (e.innerText || e.getAttribute('aria-label')
              || e.getAttribute('placeholder') || e.getAttribute('name')
-             || e.getAttribute('href') || '').trim().replace(/\s+/g, ' ').slice(0, 90);
+             || e.value || e.getAttribute('href') || '').trim().replace(/\s+/g, ' ').slice(0, 90);
     const tag = e.tagName.toLowerCase();
     // A link with no label and no real destination is decoration, not a target.
     const href = e.getAttribute('href') || '';
@@ -1572,7 +1572,7 @@ def run(
             # safe start for the re-plan.
             probe = None
 
-    if writer is None or not decompose:
+    if writer is None or not writer.available or not decompose:
         result = _run_one(
             driver, target, goal, chooser, act=act, max_steps=max_steps,
             min_confidence=min_confidence, settle=settle, writer=writer,

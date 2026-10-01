@@ -18,9 +18,12 @@ is optional there. Do not operate the same page the user is actively editing.
 3. Reading a known URL: `browser_read(port=N, url="https://...")`.
    This navigates and reads in one call, with no decision-model request.
    Several URLs: `browser_read_many(port=N, urls=[...])`.
-4. Clicking, filling or scrolling: `browser_use(port=N, goal="...", act=true)`.
-   Keep the goal short; use `decompose=false` for a single step. Read afterward
-   to verify. Report only observed facts.
+4. Exact action: `browser_action(port=N, action="click", label="Save")` or
+   `action="fill", label="Email", text="user@example.com"`. Scroll uses
+   `action="scroll_down"`. This acts once and returns text without a Jev call.
+   If the target is ambiguous or needs several steps, use
+   `browser_use(port=N, goal="...", act=true)`: Jev chooses from real controls.
+   Keep goals short; use `decompose=false` for a single step. Verify the result.
 5. After a GoLogin task call `browser_close()` to save its state.
 
 If MCP tools are missing, search once, then use the built-in shell fallback:
@@ -29,6 +32,7 @@ If MCP tools are missing, search once, then use the built-in shell fallback:
 jev-use call browser_profiles
 jev-use call browser_open --profile Default
 jev-use call browser_read --port 9222 --url https://example.com
+jev-use call browser_action --port 9222 --action click --label Save
 jev-use call browser_use --port 9222 --goal "open billing" --act
 ```
 

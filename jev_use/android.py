@@ -1377,7 +1377,7 @@ def run(
                     return replayed
                 cache.drop(f"{start_key}|{goal}", goal)
 
-    if writer is None or not decompose:
+    if writer is None or not writer.available or not decompose:
         result = _run_one(
             serial, goal, chooser, act=act, max_steps=max_steps,
             min_confidence=min_confidence, settle=settle, writer=writer,
