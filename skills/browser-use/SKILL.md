@@ -4,11 +4,13 @@ description: Use Chrome or GoLogin to read sites and perform browser actions.
 ---
 
 Use jev-use tools. Keep calls and output short.
-Chrome opens in the background by default. Known URLs use a dedicated background
-tab; CDP actions do not move the user's system mouse or keyboard. Keep using the
-returned port while the user works in other windows. Set `background=false` only
-if the user wants to watch Chrome. GoLogin uses its own launcher; `headless=true`
-is optional there. Do not operate the same page the user is actively editing.
+Chrome and GoLogin open visibly by default. CDP actions do not move the user's
+system mouse or keyboard; keep using the returned port while the user works in
+other windows. Never bring the browser to the foreground or use OS input.
+Known URLs use dedicated background tabs without activating them; the user can
+select those tabs to watch. Launching a visible browser may briefly take focus.
+Only use Chrome `background=true` or GoLogin `headless=true` if requested.
+Do not operate the same page the user is actively editing.
 
 1. Call `browser_profiles` once. Reuse the matching live CDP port.
 2. If closed, call `browser_open(profile="name")` once and use its returned port.

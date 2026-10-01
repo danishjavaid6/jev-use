@@ -80,6 +80,27 @@ test('commandcode preserves other servers already configured', () => {
   assert.ok(config.mcpServers['jev-use'], 'and ours was added');
 });
 
+test('Command Code quotes Windows shell paths but other harnesses keep argv paths', () => {
+  const wasWindows = paths.IS_WINDOWS;
+  paths.IS_WINDOWS = true;
+  try {
+    const windows = { command: 'C:\\Program Files\\nodejs\\node.exe', args: ['C:\\Users\\Danish Javaid\\AppData\\Roaming\\npm\\node_modules\\jev-use\\bin\\jev-use-mcp.js'] };
+    const file = commandcode.register(windows);
+    const recorded = readJson(file).mcpServers['jev-use'];
+    assert.equal(recorded.command, `"${windows.command}"`);
+    assert.deepEqual(recorded.args, windows.args.map((arg) => `"${arg}"`));
+    assert.equal(commandcode.usesShell(), true);
+    const claudeEntry = readJson(claude.register(windows)).mcpServers['jev-use'];
+    assert.equal(claudeEntry.command, windows.command);
+    assert.deepEqual(claudeEntry.args, windows.args);
+  } finally { paths.IS_WINDOWS = wasWindows; }
+});
+
+test('Command Code refuses shell-expansion characters in launcher paths', () => {
+  assert.throws(() => commandcode.quoteWindows('C:\\Users\\%USERNAME%\\node.exe'), /Unsupported character/);
+  assert.throws(() => commandcode.quoteWindows('node" & echo unsafe'), /Unsupported character/);
+});
+
 // -- claude + cursor --------------------------------------------------------
 
 test('claude writes a plain mcpServers entry', () => {

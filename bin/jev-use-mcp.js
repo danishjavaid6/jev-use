@@ -10,12 +10,9 @@
  * the runtime is rebuilt. Node is guaranteed to be present — npm is running us —
  * so `node .../bin/jev-use-mcp.js` is a command that keeps working.
  *
- * It also carries the two chores the Python side cannot do for itself:
- *
- *   * loading the API key from the state dir into the child's environment, so
- *     the key never has to be written into the package or a harness config;
- *   * provisioning the runtime on first use, which is the safety net for an
- *     install that ran with `--ignore-scripts` (or that failed halfway).
+ * Loads saved credentials without putting them in harness configuration, then
+ * starts an already-installed runtime. Provisioning belongs to `jev-use install`,
+ * not an MCP connection with a short timeout.
  *
  * stdout is the JSON-RPC channel and stays untouched: everything this file logs
  * goes to stderr.
@@ -31,15 +28,18 @@ const runtime = require('../lib/runtime');
 async function main() {
   let python;
   try {
-    python = await runtime.ensure();
+    // A harness connection must not trigger downloads or environment rebuilds:
+    // those exceed connection timeouts and can invalidate another live session.
+    python = runtime.resolve();
+    if (!python) throw new Error('Python runtime unavailable. Run: jev-use install');
   } catch (error) {
     log.fail(error.message);
     process.exit(1);
   }
 
-  const env = { ...process.env, ...config.readEnvFile() };
+  const env = { ...process.env, ...config.readEnvFile(), PYTHONUTF8: '1', PYTHONUNBUFFERED: '1' };
 
-  const child = spawn(python, ['-m', 'jev_use.mcp_server'], {
+  const child = spawn(python, ['-u', '-m', 'jev_use.mcp_server'], {
     stdio: 'inherit',
     env,
     windowsHide: true,

@@ -78,6 +78,19 @@ def test_background_tab_is_pinned_by_id_without_activation():
     assert not any(method in ("Target.activateTarget", "Page.bringToFront") for method, _, _ in fake.calls)
 
 
+@pytest.mark.parametrize("options,expected", [({}, False), ({"background": True}, True)])
+def test_browser_open_visible_by_default_with_headless_opt_in(monkeypatch, options, expected):
+    profile = profiles.LocalProfile(directory="Default", name="Default", prepared=True)
+    monkeypatch.setattr(mcp_server, "find_profile", lambda _: profile)
+    def launch(directory, **kwargs):
+        assert kwargs["background"] is expected
+        return profile, "/test/copy"
+    monkeypatch.setattr(mcp_server, "start_profile", launch)
+    assert "opened" in mcp_server.tool_browser_open({"profile": "Default", **options})
+    schema = next(t for t in mcp_server.TOOLS if t["name"] == "browser_open")
+    assert schema["inputSchema"]["properties"]["background"]["default"] is False
+
+
 def test_exact_action_refuses_duplicate_labels(monkeypatch):
     page = browser.Target(port=9333, pid=0, window_id=0)
     view = browser.Observation(page, {"elements": [

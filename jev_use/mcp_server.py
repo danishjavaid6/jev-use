@@ -65,6 +65,7 @@ from . import harness
 SERVER_NAME = "jev-use"
 SERVER_VERSION = "0.3.0"
 PROTOCOL_VERSION = "2025-06-18"
+SUPPORTED_PROTOCOL_VERSIONS = {"2024-11-05", "2025-03-26", PROTOCOL_VERSION, "2025-11-25"}
 CACHE_PATH = Path(__file__).resolve().parent.parent / ".jev-browser-cache.json"
 
 # Single source of truth: the tool schema and the handler must agree. They drifted
@@ -408,7 +409,7 @@ TOOLS: list[dict[str, Any]] = [
                     "default": False,
                     "description": "GoLogin only: start Orbita without a visible window.",
                 },
-                "background": {"type": "boolean", "default": True, "description": "Chrome only: run without opening or focusing a window. False shows the browser."},
+                "background": {"type": "boolean", "default": False, "description": "Chrome only: false (default) shows the browser; true runs headless. CDP actions do not use the system mouse or keyboard."},
                 "refresh": {
                     "type": "boolean",
                     "default": False,
@@ -823,7 +824,7 @@ def tool_browser_open(args: dict[str, Any]) -> str:
             port=port,
             refresh=bool(args.get("refresh", False)),
             url=str(args.get("url") or "about:blank"),
-            background=bool(args.get("background", True)),
+            background=bool(args.get("background", False)),
         )
     except (TimeoutError, FileNotFoundError, RuntimeError) as exc:
         return str(exc)
@@ -1094,11 +1095,13 @@ def handle(request: dict[str, Any]) -> dict[str, Any] | None:
     request_id = request.get("id")
 
     if method == "initialize":
+        requested = (request.get("params") or {}).get("protocolVersion")
+        version = requested if isinstance(requested, str) and requested in SUPPORTED_PROTOCOL_VERSIONS else PROTOCOL_VERSION
         return {
             "jsonrpc": "2.0",
             "id": request_id,
             "result": {
-                "protocolVersion": PROTOCOL_VERSION,
+                "protocolVersion": version,
                 "capabilities": {"tools": {}, "prompts": {}},
                 "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
             },

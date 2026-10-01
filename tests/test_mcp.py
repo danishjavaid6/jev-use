@@ -37,6 +37,19 @@ def test_notifications_produce_no_response() -> None:
     assert mcp_server.handle({"jsonrpc": "2.0", "method": "notifications/cancelled"}) is None
 
 
+@pytest.mark.parametrize("version", sorted(mcp_server.SUPPORTED_PROTOCOL_VERSIONS))
+def test_initialize_negotiates_supported_client_version(version: str) -> None:
+    response = mcp_server.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                                  "params": {"protocolVersion": version}})
+    assert response["result"]["protocolVersion"] == version
+
+
+def test_initialize_unknown_version_offers_supported_version() -> None:
+    response = mcp_server.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                                  "params": {"protocolVersion": "unknown"}})
+    assert response["result"]["protocolVersion"] == mcp_server.PROTOCOL_VERSION
+
+
 def test_tools_list_returns_the_registry() -> None:
     response = mcp_server.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
     returned = [t["name"] for t in response["result"]["tools"]]

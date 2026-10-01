@@ -30,6 +30,13 @@ jev-use install --harness=commandcode
 jev-use doctor
 ```
 
+`doctor` performs an MCP handshake and lists tools, then tests Command Code's
+registered launcher (including its Windows shell behavior). It reports startup
+errors instead of treating a config file as proof of a connection. A successful
+check verifies the launcher, not the desktop app's live connection; use `/mcp`
+or **Test connections** in the app after restarting it. MCP startup never installs
+or repairs Python; if the runtime is missing, run `jev-use install` first.
+
 Set keys once:
 
 ```text
@@ -84,8 +91,9 @@ harness's tool discovery and tokenizer.
 
 ## Background work
 
-`browser_open` launches Chrome headless by default. Set `background=false` to
-show it. Known URL tasks use a dedicated background tab; parallel reads pin
+`browser_open` launches a visible browser by default. Chrome `background=true`
+opts into headless mode. Opening a visible window may briefly take focus; ongoing
+CDP actions do not bring it to the foreground. Known URL tasks use a dedicated background tab; parallel reads pin
 each tab by ID. CDP actions do not move the system mouse or send OS keystrokes,
 so the user can work in other windows. Do not automate the same page the user
 is editing. Sites that open native dialogs may still need user interaction.
