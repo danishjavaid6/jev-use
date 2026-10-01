@@ -227,6 +227,7 @@ def start_profile(
     refresh: bool = False,
     url: str = "about:blank",
     timeout: float = LAUNCH_TIMEOUT,
+    background: bool = False,
 ) -> tuple[LocalProfile, str]:
     """Launch one profile from a prepared copy, with CDP, and wait for the endpoint."""
     if _cdp_alive(port):
@@ -237,7 +238,7 @@ def start_profile(
 
     workdir = prepare_profile(directory, refresh=refresh)
     binary = browser_binary()
-    subprocess.Popen(
+    process = subprocess.Popen(
         [
             binary,
             f"--remote-debugging-port={port}",
@@ -245,6 +246,7 @@ def start_profile(
             f"--profile-directory={directory}",
             "--no-first-run",
             "--no-default-browser-check",
+            *(["--headless=new"] if background else []),
             url,
         ],
         stdout=subprocess.DEVNULL,
@@ -262,6 +264,12 @@ def start_profile(
                     profile.port = port
                     break
             return profile, str(workdir)
+        if process.poll() is not None:
+            raise RuntimeError(
+                f"browser exited before CDP opened (exit {process.returncode}): {binary}. "
+                "For Chrome set JEV_USE_BROWSER_BINARY to the real Chrome executable. "
+                "For GoLogin use vendor=gologin with an API token."
+            )
         time.sleep(0.4)
 
     raise TimeoutError(

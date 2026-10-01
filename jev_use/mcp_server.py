@@ -171,10 +171,8 @@ def _harness_wanted(port: int | None) -> bool:
     """Whether this endpoint should be driven over the browser-harness transport.
 
     `JEV_USE_TRANSPORT` forces the choice (`driver` / `harness`); the default is
-    `auto`, which picks the harness only for an antidetect browser (GoLogin /
-    Orbita). That is the one case where the port is always explicit — the SDK hands
-    it back at launch — so the decision is deterministic, and a Chrome someone
-    drives by profile is left on the path it has always used.
+    `auto`, which uses a persistent CDP connection for any explicit browser port
+    when the client is installed. Profile requests resolve their port once.
     """
     mode = (os.environ.get("JEV_USE_TRANSPORT") or "auto").strip().lower()
     if mode == "driver":
@@ -185,14 +183,16 @@ def _harness_wanted(port: int | None) -> bool:
         return port is not None
     if port is None or not harness.available():
         return False
-    session = _GOLOGIN.get("session")
-    if session is not None and session.port == port:
-        return True
-    return any(p.vendor != "chrome" and p.port == port for p in running_profiles())
+    return True
 
 
 def _start_session(profile: str | None, port: int | None) -> tuple[Any, Any]:
     """A started transport and its Target — the harness where it applies, else a driver."""
+    if port is None and harness.available() and (os.environ.get("JEV_USE_TRANSPORT") or "auto") != "driver":
+        from .browser import _pick_profile
+        chosen, _ = _pick_profile(running_profiles(), profile)
+        if chosen is not None:
+            port = chosen.port
     if _harness_wanted(port):
         session = harness.Harness(port=port)  # type: ignore[arg-type]
         session.start()
@@ -291,90 +291,25 @@ def render(result: Any) -> str:
 
 PROMPT_NAME = "browser-use"
 
-PROMPT_TEMPLATE = """Use the jev-use browser tools to do this task in the user's own browser:
-
-    {task}
-
-Follow this order and do not skip steps:
-
-1. Call browser_profiles FIRST. It costs ~0.15s and lists the running browsers and
-   the profiles on disk.
-
-   * If a browser is already drivable (`cdp:port`) and it is the profile the user
-     meant, use it.
-   * If the user means a GoLogin profile (listed under GOLOGIN), open it with
-     browser_open(profile="<name>", vendor="gologin") — GoLogin starts it in its own
-     browser, not a copied Chrome — then call browser_close when the task is done,
-     because that is what saves its cookies and login state.
-   * If nothing is drivable, call browser_open(profile="<name>") with the profile the
-     user named — that copies it and launches it with a CDP endpoint. It takes a
-     moment and uses disk; say so if the profile is large.
-   * If you do not know which profile the user means and several plausibly match,
-     ask rather than guessing. Never substitute a different browser: the whole point
-     is that this runs against the profile holding their logins.
-
-2. For each page you need: browser_use(url=..., goal=..., act=true) to get there.
-   Jev picks every in-page action, so describe the destination, not the clicks.
-
-3. Then get the content. browser_use orbits the page; it does not report what the
-   page says.
-
-   * **browser_extract** when the user asked a specific question ("how many tokens?",
-     "what does it cost?", "which deploys failed?"). Give it typed questions and get
-     typed values back — cheaper and more accurate than reading a wall of text.
-   * **browser_read** when you need the whole page: an unfamiliar page, a commit
-     list, deciding what to ask next. It waits for the page to render, so a blank
-     result means the page really is blank — do not retry it.
-
-   **Use the site's own UI, never a public API, for anything behind a login.** An
-   unauthenticated API cannot see private repos or account data, and searching
-   public sources for the user's own repos finds strangers' repos with similar
-   names. If a repo, dashboard or bill is the user's, read it in their session.
-
-4. Answer the user from what browser_read returned, and quote the specific values
-   you saw (numbers, names, dates). If a page needed a login and the session had
-   expired, say so plainly rather than guessing at the contents.
-
-Report per section: what you opened, what it said, and anything you could not reach.
+PROMPT_TEMPLATE = """Task: {task}
+Call browser_profiles once; reuse the matching port or browser_open the requested profile.
+For a known URL use browser_read(port=N, url=...) directly. For several URLs use
+browser_read_many. Use browser_use only for interactions, then read to verify.
+Never substitute a different browser for a requested account. GoLogin needs
+vendor=\"gologin\" and browser_close afterward.
+If tools are missing, search once then use `jev-use call <tool>` in the shell.
+Do not build clients or debug the installation during the task. Retry once at
+most; report failures and stop. Quote only what you read.
 """
 
 MOBILE_PROMPT_NAME = "mobile-use"
 
-MOBILE_PROMPT_TEMPLATE = """Use the jev-use phone tools to do this task on the user's own Android phone:
-
-    {task}
-
-Follow this order and do not skip steps:
-
-1. Call android_devices FIRST. It answers the two things that go wrong silently:
-
-   * Nothing listed — the phone is not connected. USB, or `adb connect <ip>:5555` for
-     wireless debugging; on the phone, Settings > Developer options > USB debugging.
-   * `[unauthorized]` — the phone has not accepted the debugging prompt. Unlock it and
-     accept the dialog; nothing works until it is accepted.
-
-   If several devices are attached, pass `serial` explicitly. The server refuses to
-   guess, and it will not substitute a different phone.
-
-2. android_use(goal=..., act=true) to get there. Jev picks every tap, so describe the
-   destination, not the taps. Leave `decompose` on unless the goal is already one step.
-   `act=false` (the default) decides and validates WITHOUT touching the phone — the
-   right first move for anything destructive. `go_back` and `go_home` are offered on
-   every screen; backing out of a screen is often the fastest route, not a failure.
-
-3. android_use CHANGES the screen; it does not report what it says. Use **android_read**
-   to answer a question about what the phone shows. It reads the view hierarchy, so the
-   text is exact rather than OCR — no vision model involved.
-
-4. Answer from what android_read returned, and quote the specific values you saw
-   (names, numbers, times, toggle states). If a screen needed a login and the session
-   had expired, say so plainly rather than guessing at the contents.
-
-android_location reports the location Facebook attributes to the signed-in account,
-read from Facebook's own page inside the app. Read `state` before the value:
-`location` (quote it), `login` (signed out — say so), `unknown` (not rendered — retry).
-
-Report per section: what you opened, what it said, and anything you could not reach.
+MOBILE_PROMPT_TEMPLATE = """Task: {task}
+Call android_devices once. Use android_read to read and android_use(act=true)
+to perform the requested action. Pass serial when several devices are connected.
+Read again to verify. If tools are missing use `jev-use call <tool>` in the shell.
+No helper clients or repair loops. Retry a transient failure once; otherwise
+report it and stop. The phone must be unlocked with USB debugging accepted.
 """
 
 PROMPT_TEMPLATES: dict[str, str] = {
@@ -433,16 +368,7 @@ def prompt_messages(name: str, arguments: dict[str, Any]) -> dict[str, Any] | No
 TOOLS: list[dict[str, Any]] = [
     {
         "name": "browser_profiles",
-        "description": (
-            "List every Chrome profile: those already running (with whether a CDP "
-            "endpoint answers) and those that exist on disk but are closed. Call this "
-            "FIRST. Pass `only_running: true` for just the running browsers, or "
-            "`available: true` for profiles you could open with browser_open. It never "
-            "launches or modifies anything.\n\n"
-            "Running antidetect browsers (GoLogin/Orbita, shown as [gologin]) appear here "
-            "too when they were started with a debugging port. They cannot be opened with "
-            "browser_open — drive them by passing their port to browser_use."
-        ),
+        "description": "List running browsers and saved profiles. Call FIRST, once; reuse a matching live CDP port.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -457,26 +383,7 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "browser_open",
-        "description": (
-            "Open a browser profile that is not running, with a CDP endpoint, and "
-            "leave it running for browser_use. Use the display name from "
-            "browser_profiles (e.g. 'Work', 'Outlook 3').\n\n"
-            "Two kinds of profile, chosen by `vendor`:\n\n"
-            "* **A Chrome profile** (default) is COPIED into a private directory first, "
-            "because Chrome refuses a debugging port on the default data directory. "
-            "The copy carries your cookies, so the logins are there — but it is a "
-            "SNAPSHOT: signing in to the original afterwards does not reach it, so pass "
-            "refresh=true to re-copy. One profile is ~0.5-1.5 GB, copied once.\n\n"
-            "* **A GoLogin profile** (`vendor=\"gologin\"`) is NOT copied. GoLogin starts "
-            "it in its own browser (Orbita) with its fingerprint, proxy and cookies "
-            "intact, and this returns the port it came up on. This needs a GoLogin API "
-            "token (`jev-use install --gologin-token=<token>`). It can take a while: "
-            "GoLogin downloads the profile, and Orbita the first time. Call browser_close "
-            "when the task is done so GoLogin saves the profile.\n\n"
-            "With the default vendor=\"auto\", a name is looked up as a Chrome profile "
-            "first and falls back to GoLogin only when there is no Chrome profile by "
-            "that name."
-        ),
+        "description": "Open a Chrome profile SNAPSHOT (refresh to update): CDP requires a non-default data directory. For native GoLogin use vendor=gologin. Returns the port to use.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -506,6 +413,7 @@ TOOLS: list[dict[str, Any]] = [
                     "default": False,
                     "description": "GoLogin only: start Orbita without a visible window.",
                 },
+                "background": {"type": "boolean", "default": True, "description": "Chrome only: run without opening or focusing a window. False shows the browser."},
                 "refresh": {
                     "type": "boolean",
                     "default": False,
@@ -517,26 +425,12 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "browser_close",
-        "description": (
-            "Stop the GoLogin profile that browser_open started, saving its cookies and "
-            "login state back to GoLogin. Call this when the task is done: the GoLogin "
-            "SDK only commits the profile on stop, so a profile left running loses what "
-            "the session did. It does nothing to Chrome profiles (leaving those open is "
-            "harmless)."
-        ),
+        "description": "Stop the GoLogin profile this server opened and save its cookies.",
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
         "name": "browser_use",
-        "description": (
-            "Drive the browser toward a plain-English goal, with Jev choosing each "
-            "action. Operates on the page's DOM over CDP: Jev selects only from "
-            "elements this server enumerated, so it cannot invent an action, and the "
-            "choice is validated against the snapshot it came from. Returns a step "
-            "log and timing. Set act=false (default) to decide without clicking.\n\n"
-            "This orbits the page rather than reading it — to answer a question about "
-            "what a page says, call browser_read afterwards."
-        ),
+        "description": "Perform browser interactions toward a short goal. Set act=true to act. For reading known URLs use browser_read(url=...) instead. Read after actions to verify.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -604,23 +498,7 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "browser_extract",
-        "description": (
-            "Ask Jev typed questions about the current page and get typed values instead "
-            "of a wall of text. Prefer this over browser_read whenever the user asked a "
-            "specific question. "
-            "This is how to ANSWER a question about a page: browser_read returns 10-20 KB "
-            "of raw text for a dashboard, whereas browser_extract returns values.\n\n"
-            "It is also more trustworthy — Jev cannot generate a number it did not "
-            "read, so a figure in the answer came from the page. All questions are "
-            "evaluated in parallel in one call, so asking six costs about the same as "
-            "asking one.\n\n"
-            "Example:\n"
-            '  {"usage":    {"type":"noul",   "instructions":"Is this page logged out?"},\n'
-            '   "tokens":   {"type":"score",  "instructions":"How many tokens are used?",\n'
-            '                "criteria":["none","under 1M","1M-100M","over 100M"]},\n'
-            '   "plan":     {"type":"choice", "instructions":"Which plan is shown?",\n'
-            '                "criteria":{"free":"Free tier","goat":"Paid GOAT plan","other":"Something else"}}}'
-        ),
+        "description": "Extract typed answers from page text using Jev. For ordinary questions use browser_read.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -644,16 +522,12 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "browser_read",
-        "description": (
-            "Return the visible text of the current page, WAITING for it to render "
-            "(single-page apps return an empty shell until their data arrives, which "
-            "readyState does not reflect). Use this to answer questions about what a "
-            "page says — usage, billing, commits, deployments. Pairs with browser_use "
-            "to get somewhere first. For a specific question prefer browser_extract."
-        ),
+        "description": "Navigate to an optional URL and return visible page text. No decision model needed. Pass port from browser_open.",
         "inputSchema": {
             "type": "object",
             "properties": {
+                "url": {"type": "string", "description": "Navigate here and read in one call; no decision model needed."},
+                "max_chars": {"type": "integer", "default": 6000, "description": "Output limit, up to 20000."},
                 "port": {"type": "integer", "description": "Explicit CDP port."},
                 "profile": {
                     "type": "string",
@@ -664,15 +538,7 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "browser_read_many",
-        "description": (
-            "Read SEVERAL pages at once — one tab each, in parallel — and return the "
-            "text of each. Use this instead of calling browser_read N times when a "
-            "task spans many URLs (a list of sites, a batch of tickets): it is a "
-            "single tool call, it overlaps the page loads, and you pay one turn "
-            "instead of N. Results come back in the order you asked, each labelled "
-            "with its URL; a page that fails is reported in place rather than "
-            "failing the batch. A maximum of 8 URLs is opened at once."
-        ),
+        "description": "Read known URLs in parallel tabs. Pass the browser port. Prefer one call over a loop of reads.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -702,28 +568,12 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "android_devices",
-        "description": (
-            "List the Android devices attached over adb, with their serial and model, "
-            "and whether each is usable. Call this FIRST for any phone task — it also "
-            "reports the two states that explain every failed attempt: 'unauthorized' "
-            "(the phone has not accepted the debugging prompt) and no devices at all. "
-            "Never launches or modifies anything."
-        ),
+        "description": "List connected Android devices. Call once before phone tasks.",
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
         "name": "android_use",
-        "description": (
-            "Drive the phone toward a plain-English goal, with Jev choosing each "
-            "action. It reads the live view hierarchy (uiautomator) and taps real "
-            "elements, so Jev selects only from elements this server enumerated and "
-            "cannot invent a tap at a bare coordinate. Returns a step log and timing. "
-            "Set act=false (default) to decide without touching the phone.\n\n"
-            "This changes the screen rather than reporting it — to answer a question "
-            "about what the phone shows, call android_read afterwards.\n\n"
-            "Navigation is cheap here: `go_back` and `go_home` are offered on every "
-            "screen, and backing out of a screen is often the fastest route."
-        ),
+        "description": "Perform phone actions toward a short goal. Set act=true to act. Pass serial for multiple devices; android_read afterward verifies.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -773,12 +623,7 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "android_read",
-        "description": (
-            "Return the text the phone is currently showing, read from the view "
-            "hierarchy rather than from a screenshot — so it is exact text, not OCR, "
-            "and needs no vision model. Use it to answer a question about what is on "
-            "screen. Password fields contribute their presence but never their value."
-        ),
+        "description": "Return the current phone screen text without a model request.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -788,22 +633,7 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "android_location",
-        "description": (
-            "Report the location Facebook currently attributes to the account signed "
-            "in on the phone. It opens Facebook's own 'primary location' page INSIDE "
-            "the app — through the app's internal deep link, so the page renders as an "
-            "app screen rather than in Chrome — and reads it. Use this when the user "
-            "asks which country or city Facebook thinks they are in, or whether an "
-            "account reads as belonging to a particular one.\n\n"
-            "It answers for whichever account is signed in at that moment: switch "
-            "accounts in the app and call it again for the other one. The result says "
-            "whether it found a location page or a sign-in page, so 'not signed in' is "
-            "never confused with 'did not render'.\n\n"
-            "This READS Facebook's own inference — the profile's current city, the "
-            "connection's IP, check-ins and the device location. It reads it, it cannot "
-            "change it, and it is not the same thing as a payout country or a region "
-            "setting."
-        ),
+        "description": "Read the Facebook account location. Quote location only when state=location.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -1011,6 +841,7 @@ def tool_browser_open(args: dict[str, Any]) -> str:
             port=port,
             refresh=bool(args.get("refresh", False)),
             url=str(args.get("url") or "about:blank"),
+            background=bool(args.get("background", True)),
         )
     except (TimeoutError, FileNotFoundError, RuntimeError) as exc:
         return str(exc)
@@ -1046,6 +877,7 @@ def tool_browser_use(args: dict[str, Any]) -> str:
 
     def body(driver: Driver, target: Any) -> Any:
         if args.get("url"):
+            _background_tab(driver, target)
             # Points the page at the URL and waits for it to actually arrive. The
             # baseline is read from the live page, not the target's cached URL.
             navigate_and_settle(
@@ -1108,15 +940,28 @@ def tool_browser_extract(args: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _background_tab(driver: Any, target: Any) -> None:
+    if isinstance(driver, harness.Harness) and not (target.url_hint or "").startswith("target:"):
+        tab = driver.open_tab("about:blank")
+        target.url_hint = f"target:{tab['id']}"
+
+
 def tool_browser_read(args: dict[str, Any]) -> str:
+    def body(driver: Any, target: Any) -> str:
+        if args.get("url"):
+            _background_tab(driver, target)
+            navigate_and_settle(driver, target, args["url"], 2.0)
+        return browser_read(driver, target)
+
     text, target = with_browser_session(
         args.get("profile"),
-        lambda driver, target: browser_read(driver, target),
+        body,
         _port(args),
     )
     if not text:
         return "(the page returned no visible text)"
-    return f"url={target.url}\n\n{text[:20000]}"
+    limit = max(500, min(int(args.get("max_chars", 6000)), 20000))
+    return f"port={target.port} url={target.url}\n\n{text[:limit]}"
 
 
 def tool_browser_read_many(args: dict[str, Any]) -> str:

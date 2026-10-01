@@ -222,8 +222,7 @@ single handshake instead of three `cua-driver mcp` spawns. `jev-use install
 --gologin-token=<token>` installs it alongside the SDK; without it GoLogin still works,
 over the slower `page` path, and `browser_open` says which one it is using.
 `JEV_USE_TRANSPORT=harness|driver|auto` forces the choice — the default `auto` uses the
-harness for GoLogin/Orbita and leaves a profile-driven Chrome on the path it has always
-used.
+harness for both Chrome and GoLogin/Orbita when the CDP client is installed.
 
 The transport deliberately keeps its CDP surface as small as it can, because every domain
 it touches is a signal and every override would damage the identity GoLogin exists to
@@ -276,6 +275,37 @@ both slash commands to `~/.agents/skills` as a shared global fallback. No projec
 folder needs to be opened, and the harness does not need the repository checkout.
 On Windows, use the `install.ps1` bootstrap; the shared location is
 `%USERPROFILE%\.agents\skills`.
+
+For quick reads, use `browser_read(port=N, url="https://...")`: one call
+navigates and reads without calling the decision model. Text defaults to 6,000
+characters (`max_chars` can raise it to 20,000). Browser calls use a persistent
+CDP connection when the client is installed, for both Chrome and GoLogin.
+
+If the app has loaded the skill but cannot find the MCP tools, the built-in CLI
+provides the same handlers without making the model write a helper client:
+
+```powershell
+jev-use call browser_profiles
+jev-use call browser_open --profile Default
+jev-use call browser_read --port 9222 --url https://example.com
+jev-use call android_devices
+jev-use call android_use --goal "open Settings" --act
+```
+
+Use the port returned by `browser_open`. Advanced arguments can be supplied with
+`--json-file <path>`. This fallback starts a process per command; native MCP is
+preferred for repeated calls. Re-running `jev-use install` updates both installed
+skills. If Windows resolves Orbita instead of Chrome, installed Chrome paths now
+take precedence; `JEV_USE_BROWSER_BINARY` can select an explicit executable.
+
+Chrome profiles opened through MCP run headless by default (`background=false`
+shows a window). Known URL tasks create a dedicated background tab. CDP clicks
+and typing address the page directly, without moving the OS cursor, activating
+windows, or sending system keystrokes. The user can work in other apps while the
+browser task runs. Parallel reads use background tabs pinned by target ID.
+GoLogin preserves its native launch; pass `headless=true` if desired. Android
+tasks use the phone's visible screen, so they can run while the user works on the
+PC, but cannot simultaneously operate another app on that same phone screen.
 
 Either way the guidance is identical: discover → open if needed → drive → **read** →
 report, with an explicit instruction to call `browser_open` when nothing is drivable

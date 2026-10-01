@@ -608,6 +608,11 @@ def attach(
     either way.
     """
     owner_pid: int | None = None
+    # An explicit CDP transport needs no expensive Windows CIM/process scan.
+    if port is not None and callable(getattr(session, "evaluate", None)):
+        if not cdp_alive(port):
+            raise DriverError(f"port {port} has no CDP endpoint")
+        return Target(port=port, pid=0, window_id=0, url_hint=url_hint)
     profiles = running_profiles()
 
     if port is None:
@@ -1133,13 +1138,15 @@ def read_many(
         tab: dict[str, Any] | None = None
         driver = None
         try:
-            tab = open_tab(base.port, url)
+            driver = new_driver() if new_driver is not None else Driver()
+            driver.start()
+            opener = getattr(driver, "open_tab", None)
+            tab = opener(url) if callable(opener) else open_tab(base.port, url)
             if tab is None:
                 results[index] = (url, "[error] could not open a tab")
                 return
-            target = replace(base, url_hint=_tab_hint(tab, url))
-            driver = new_driver() if new_driver is not None else Driver()
-            driver.start()
+            hint = f"target:{tab['id']}" if callable(opener) else _tab_hint(tab, url)
+            target = replace(base, url_hint=hint)
             results[index] = (url, read(driver, target, wait=wait, timeout=timeout))
         except Exception as exc:  # noqa: BLE001 - one page must not sink the batch
             results[index] = (url, f"[error] {exc}")

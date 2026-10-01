@@ -266,6 +266,13 @@ class Harness:
 
     # -- page work ---------------------------------------------------------
 
+    def open_tab(self, url: str) -> dict[str, Any]:
+        """Create a background tab without activating a window or moving the mouse."""
+        result = self._submit(self._client.send_raw(
+            "Target.createTarget", {"url": url, "background": True}
+        ))
+        return {"id": result["targetId"], "url": url}
+
     def evaluate(self, javascript: str, url_hint: str | None = None) -> str:
         """Run `javascript` in the target tab and return its value as text.
 
@@ -344,7 +351,12 @@ class Harness:
         pages = [t for t in targets if t.get("type") == "page"]
         matched = None
         if url_hint:
-            matched = next((t for t in pages if url_hint in (t.get("url") or "")), None)
+            if url_hint.startswith("target:"):
+                matched = next((t for t in pages if t.get("targetId") == url_hint[7:]), None)
+                if matched is None:
+                    raise HarnessError("the automation tab was closed; open a URL again")
+            else:
+                matched = next((t for t in pages if url_hint in (t.get("url") or "")), None)
         chosen = matched or next(
             (t for t in pages if not (t.get("url") or "").startswith(_INTERNAL)), None
         )

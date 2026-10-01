@@ -55,6 +55,8 @@ class FakeCDP:
         self.calls.append((method, dict(params or {}), session_id))
         if method == "Target.getTargets":
             return {"targetInfos": self.pages}
+        if method == "Target.createTarget":
+            return {"targetId": "T2"}
         if method == "Target.attachToTarget":
             return {"sessionId": f"S-{(params or {})['targetId']}"}
         if method == "Runtime.evaluate":
@@ -328,7 +330,7 @@ GOLOGIN = browser.Profile(
 CHROME = browser.Profile(pid=1, profile_dir="/home/h/.config/google-chrome", port=9222)
 
 
-def test_the_harness_is_chosen_only_for_an_antidetect_endpoint(
+def test_the_harness_is_chosen_for_chrome_and_antidetect_endpoints(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(mcp_server.harness, "available", lambda: True)
@@ -337,7 +339,7 @@ def test_the_harness_is_chosen_only_for_an_antidetect_endpoint(
     monkeypatch.setattr(mcp_server, "running_profiles", lambda: [GOLOGIN, CHROME])
 
     assert mcp_server._harness_wanted(53142) is True
-    assert mcp_server._harness_wanted(9222) is False, "Chrome keeps its existing path"
+    assert mcp_server._harness_wanted(9222) is True
     assert mcp_server._harness_wanted(None) is False
 
 

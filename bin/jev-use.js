@@ -14,11 +14,15 @@ const harnesses = require('../lib/harnesses');
 const log = require('../lib/log');
 const paths = require('../lib/paths');
 const runtime = require('../lib/runtime');
+const config = require('../lib/config');
 const { run } = require('../lib/run');
 
 const USAGE = `jev-use — browser use where Jev makes the decisions
 
 Usage
+  jev-use call <tool> [--port <n>] [--profile <name>] [--url <url>] [--goal <goal>] [--act]
+        Call a tool directly when the harness has not loaded MCP. No helper scripts.
+
   jev-use install [--key=<key>] [--auto] [--force] [--harness=<id,...>]
         Provision the runtime, install cua-driver, and register the MCP server
         and the /browser-use and /mobile-use skills with every harness it finds.
@@ -103,6 +107,15 @@ async function profiles(args) {
 }
 
 async function main() {
+  if (process.argv[2] === 'call') {
+    const python = await runtime.ensure();
+    const result = run(python, ['-m', 'jev_use.tool_cli', ...process.argv.slice(3)], {
+      stdio: 'inherit',
+      env: { ...process.env, ...config.readEnvFile() },
+      timeout: 120000,
+    });
+    return result.status === null ? 1 : result.status;
+  }
   const { flags, rest } = parseArgs(process.argv.slice(2));
   const command = rest[0] || 'help';
 

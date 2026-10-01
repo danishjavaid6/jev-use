@@ -138,7 +138,12 @@ def find_browser_binary() -> str | None:
     per-user install hides: on Windows Chrome is almost never on PATH, so the
     registry and `%LOCALAPPDATA%` are the paths that actually resolve.
     """
-    for name in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "chrome"):
+    override = os.environ.get("JEV_USE_BROWSER_BINARY")
+    if override:
+        if not Path(override).is_file():
+            raise FileNotFoundError(f"JEV_USE_BROWSER_BINARY does not exist: {override}")
+        return override
+    for name in (() if IS_WINDOWS else ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "chrome")):
         found = shutil.which(name)
         if found:
             return found
@@ -155,9 +160,6 @@ def find_browser_binary() -> str | None:
             if base:
                 candidates += [Path(base) / rel for rel in _WINDOWS_CHROME_PATHS]
         candidates.append(local / "Google" / "Chrome" / "Application" / "chrome.exe")
-        from_registry = _windows_chrome_from_registry()
-        if from_registry:
-            return from_registry
     elif IS_MACOS:
         for rel in _MACOS_CHROME_PATHS:
             candidates += [Path("/Applications") / rel, home / "Applications" / rel]
@@ -165,6 +167,8 @@ def find_browser_binary() -> str | None:
     for path in candidates:
         if path.exists():
             return str(path)
+    if IS_WINDOWS:
+        return _windows_chrome_from_registry()
     return None
 
 

@@ -256,7 +256,7 @@ test('a GoLogin token is saved and pulls in the GoLogin SDK', async () => {
     assert.equal(summary.gologin, true);
     assert.deepEqual(
       calls,
-      ['gologin', 'harness'],
+      ['gologin'],
       'the token asks for the SDK and the CDP client it is driven over'
     );
     const env = fs.readFileSync(path.join(dir, '.env'), 'utf8');

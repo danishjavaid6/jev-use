@@ -152,6 +152,7 @@ def test_handlers_cover_every_declared_tool() -> None:
 def test_a_healthy_driver_session_is_reused(monkeypatch: pytest.MonkeyPatch) -> None:
     """browser_use -> browser_read -> browser_extract must not each spawn a driver."""
     created: list[Any] = []
+    monkeypatch.setenv("JEV_USE_TRANSPORT", "driver")
 
     class FakeDriver:
         def __init__(self) -> None:
