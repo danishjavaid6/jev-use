@@ -34,6 +34,15 @@ Do not operate the same page the user is actively editing.
    selectors are unknown, then write the script and run it. Do not switch to
    agent-browser for the same page. Install it once with
    `bun install -g betterwright` and verify the script result.
+   `browser_script` dismisses recognized cookie/promotional overlays by default;
+   it does not click generic `Close` buttons, because Facebook account choosers
+   and login dialogs are task-critical. Handle those with an exact locator. For
+   native JavaScript dialogs, prepare `dialogs.dismissNext()` or
+   `dialogs.acceptNext()` immediately before the action that opens the dialog.
+   When the MCP server is loaded, call `browser_script` directly. Do not run
+   `jev-use call browser_script` from the shell: that starts a second process
+   which cannot release the MCP server's existing CDP connection and can cause
+   a `connectOverCDP` timeout.
    If the target is ambiguous or needs several steps without a prepared script, use
    `browser_use(port=N, goal="...", act=true)`: Jev chooses from real controls.
    Keep goals short; use `decompose=false` for a single step. Verify the result.

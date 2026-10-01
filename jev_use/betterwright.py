@@ -61,12 +61,34 @@ def executable() -> str | None:
 
 
 def _environment_for(command: str) -> dict[str, str]:
-    """Add the command's directory to PATH for Bun/npm shims on Windows."""
+    """Add BetterWright and Bun directories to PATH for Windows shims."""
     env = os.environ.copy()
-    directory = str(Path(command).parent)
+    directories = [Path(command).parent]
+    for name in ("bun", "bun.cmd", "bun.exe"):
+        found = shutil.which(name)
+        if found:
+            directories.append(Path(found).parent)
+    for variable in ("APPDATA", "LOCALAPPDATA", "USERPROFILE"):
+        value = env.get(variable)
+        if value:
+            base = Path(value)
+            directories.extend((base / "npm", base / ".bun" / "bin", base / "AppData" / "Roaming" / "npm"))
+            # Bun installed through npm can keep the real executable below the
+            # global prefix while the top-level `bun` entry is only a shim.
+            node_modules = base / "npm" / "node_modules"
+            if node_modules.is_dir():
+                for candidate in node_modules.glob("bun*/**/bun.exe"):
+                    directories.append(candidate.parent)
+    bun_install = env.get("BUN_INSTALL")
+    if bun_install:
+        directories.append(Path(bun_install) / "bin")
     current = env.get("PATH", "")
-    if directory and directory not in current.split(os.pathsep):
-        env["PATH"] = directory + (os.pathsep + current if current else "")
+    entries = [item for item in current.split(os.pathsep) if item]
+    for directory in reversed(directories):
+        text = str(directory)
+        if text and text not in entries:
+            entries.insert(0, text)
+    env["PATH"] = os.pathsep.join(entries)
     return env
 
 

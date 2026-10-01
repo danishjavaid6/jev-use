@@ -1129,7 +1129,12 @@ def test_browser_script_uses_betterwright_without_starting_the_jev_transport(
     monkeypatch.setattr(mcp_server, "reset_browser_session", lambda: released.append(True))
 
     result = mcp_server.tool_browser_script(
-        {"port": 12345, "code": "return page.title()", "timeout": 30}
+        {
+            "port": 12345,
+            "code": "return page.title()",
+            "timeout": 30,
+            "dismiss_overlays": False,
+        }
     )
 
     assert seen == {"port": 12345, "code": "return page.title()", "timeout": 30.0}

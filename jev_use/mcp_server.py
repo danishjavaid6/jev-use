@@ -524,6 +524,14 @@ TOOLS: list[dict[str, Any]] = [
                     "default": 120,
                     "description": "Maximum script time in seconds, from 1 to 900.",
                 },
+                "dismiss_overlays": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": (
+                        "Dismiss recognized cookie/promotional overlays before the "
+                        "script. Task-critical dialogs such as account choosers are untouched."
+                    ),
+                },
             },
             "required": ["code"],
         },
@@ -1039,10 +1047,16 @@ def tool_browser_script(args: dict[str, Any]) -> str:
     if betterwright.executable() is None:
         return betterwright.INSTALL_HINT
     reset_browser_session()
+    code = str(args.get("code") or "")
+    if args.get("dismiss_overlays", True):
+        # BetterWright only dismisses overlays it classifies as cookie or
+        # promotional. It will not click a generic Close button, which is
+        # important for Facebook's task-critical account chooser.
+        code = "try { await overlays.dismiss(); } catch (_) {}\n" + code
     try:
         result = betterwright.run_script(
             port,
-            str(args.get("code") or ""),
+            code,
             timeout=float(args.get("timeout", 120)),
         )
     except betterwright.BetterWrightError as exc:
