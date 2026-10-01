@@ -263,6 +263,20 @@ no evidence of. For anything *else*, `jev-use harnesses --print` emits the one
 block any MCP-capable harness needs, and the global install puts `jev-use-mcp` on
 PATH so a harness can be pointed at the bare command instead of an absolute path.
 
+The install is user-scoped, not project-scoped. Run it once on each device (from
+any directory), then open any supported harness from any project:
+
+```bash
+npm install -g <jev-use-package>
+jev-use install --key=<key>
+```
+
+This writes the MCP registration to the harness's user configuration and copies
+both slash commands to `~/.agents/skills` as a shared global fallback. No project
+folder needs to be opened, and the harness does not need the repository checkout.
+On Windows, use the `install.ps1` bootstrap; the shared location is
+`%USERPROFILE%\.agents\skills`.
+
 Either way the guidance is identical: discover → open if needed → drive → **read** →
 report, with an explicit instruction to call `browser_open` when nothing is drivable
 rather than stopping or silently substituting a different browser.

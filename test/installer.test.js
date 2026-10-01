@@ -183,6 +183,18 @@ test('doctor reports the slash commands, not only the server', async () => {
   assert.ok(!/skills\s+not installed/.test(after), 'once copied, the skill is reported present');
 });
 
+test('skills install into the shared global agent directory on a fresh machine', () => {
+  // No harness-specific directory exists here. The shared user-scoped location
+  // must still receive both slash commands so a harness opened from any project
+  // can discover them later.
+  const results = skills.install({ force: true });
+  const shared = path.join(dir, '.agents', 'skills');
+  assert.ok(results.some((result) => result.file.startsWith(shared) && result.ok));
+  for (const name of ['browser-use', 'mobile-use']) {
+    assert.ok(fs.existsSync(path.join(shared, name, 'SKILL.md')));
+  }
+});
+
 // -- targeting a harness ----------------------------------------------------
 //
 // `--harness=<id>` is the escape hatch for a machine where detection is wrong —
