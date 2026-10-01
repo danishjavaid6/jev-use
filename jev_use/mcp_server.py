@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import atexit
 import json
+import math
 import os
 import sys
 import threading
@@ -217,6 +218,7 @@ def _browser_session(
     profile: str | None, port: int | None = None
 ) -> tuple[Any, Any]:
     """A live `(transport, target)` for `profile`/`port`, reusing the cached one when valid."""
+    betterwright.close_sessions()
     key = f"{profile or ''}|{port if port is not None else ''}"
     with _SESSION_LOCK:
         driver = _SESSION["driver"]
@@ -262,6 +264,8 @@ def stop_gologin_session() -> None:
     writes cookies and login state back to GoLogin when it stops, so a server that
     exits without stopping it drops the session on the floor.
     """
+    betterwright.close_sessions()
+    reset_browser_session()
     session = _GOLOGIN.get("session")
     if session is None:
         return
@@ -446,7 +450,7 @@ TOOLS: list[dict[str, Any]] = [
                     "default": False,
                     "description": "Actually click. Default false: decide and validate only.",
                 },
-                "max_steps": {"type": "integer", "default": DEFAULT_MAX_STEPS},
+                "max_steps": {"type": "integer", "default": DEFAULT_MAX_STEPS, "minimum": 1, "maximum": 20},
                 "min_confidence": {
                     "type": "number",
                     "default": DEFAULT_MIN_CONFIDENCE,
@@ -455,7 +459,9 @@ TOOLS: list[dict[str, Any]] = [
                 "settle": {
                     "type": "number",
                     "default": DEFAULT_SETTLE,
-                    "description": "Upper bound in seconds to wait for a navigation to land.",
+                    "minimum": 0,
+                    "maximum": 10,
+                    "description": "Wait bound in SECONDS (0–10), never milliseconds. Use 5, not 5000.",
                 },
                 "port": {
                     "type": "integer",
@@ -522,7 +528,13 @@ TOOLS: list[dict[str, Any]] = [
                 "timeout": {
                     "type": "number",
                     "default": 120,
-                    "description": "Maximum script time in seconds, from 1 to 900.",
+                    "minimum": 1,
+                    "maximum": 900,
+                    "description": "Hard deadline in seconds, from 1 to 900; timed-out scripts are never replayed.",
+                },
+                "page_url": {
+                    "type": "string",
+                    "description": "Exact existing tab URL to select when multiple tabs are open. Omit on subsequent script calls to keep the selected tab.",
                 },
                 "dismiss_overlays": {
                     "type": "boolean",
@@ -888,6 +900,7 @@ def tool_browser_open(args: dict[str, Any]) -> str:
 
 def tool_browser_close(args: dict[str, Any]) -> str:
     """Stop the GoLogin profile this server started, committing its state."""
+    betterwright.close_sessions()
     reset_browser_session()
     session = _GOLOGIN.get("session")
     if session is None:
@@ -903,7 +916,16 @@ def tool_browser_close(args: dict[str, Any]) -> str:
     )
 
 
+def _bounded_number(args: dict, name: str, default: float, low: float, high: float) -> float:
+    value = float(args.get(name, default))
+    if not math.isfinite(value) or not low <= value <= high:
+        raise ValueError(f"{name} must be between {low:g} and {high:g}; settle is in seconds, not milliseconds")
+    return value
+
+
 def tool_browser_use(args: dict[str, Any]) -> str:
+    settle = _bounded_number(args, "settle", DEFAULT_SETTLE, 0, 10)
+    max_steps = int(_bounded_number(args, "max_steps", DEFAULT_MAX_STEPS, 1, 20))
     goal = args["goal"]
     act = bool(args.get("act", False))
 
@@ -913,7 +935,7 @@ def tool_browser_use(args: dict[str, Any]) -> str:
             # Points the page at the URL and waits for it to actually arrive. The
             # baseline is read from the live page, not the target's cached URL.
             navigate_and_settle(
-                driver, target, args["url"], float(args.get("settle", DEFAULT_SETTLE))
+                driver, target, args["url"], settle
             )
 
         return browser_run(
@@ -922,9 +944,9 @@ def tool_browser_use(args: dict[str, Any]) -> str:
             goal,
             JevChooser(),
             act=act,
-            max_steps=int(args.get("max_steps", DEFAULT_MAX_STEPS)),
+            max_steps=max_steps,
             min_confidence=float(args.get("min_confidence", DEFAULT_MIN_CONFIDENCE)),
-            settle=float(args.get("settle", DEFAULT_SETTLE)),
+            settle=settle,
             writer=TextModel(),
             decompose=bool(args.get("decompose", True)),
             cache=PlanCache(CACHE_PATH) if args.get("use_cache", True) else None,
@@ -1038,27 +1060,32 @@ def tool_browser_script(args: dict[str, Any]) -> str:
         wanted = args.get("profile")
         chosen, problem = _pick_profile(running_profiles(), wanted)
         if chosen is None or chosen.port is None:
-            return problem or "no running CDP browser matched the requested profile"
+            raise betterwright.BetterWrightError(problem or "no running CDP browser matched the requested profile")
         port = chosen.port
-    # The normal MCP path keeps one cdp-use websocket alive for fast repeated
-    # browser_* calls. BetterWright needs to own the endpoint while its Playwright
-    # worker runs; release our connection first so the two transports do not race
-    # over the same Orbita target. This only detaches from CDP — it does not close
-    # GoLogin or the browser, and the next browser_* call reconnects automatically.
-    if betterwright.executable() is None:
-        return betterwright.INSTALL_HINT
+    # Detach our legacy transport, retaining its explicitly chosen workflow tab.
+    target = _SESSION.get("target")
+    page_url = args.get("page_url")
+    if not page_url and target is not None and target.port == port:
+        hint = target.url_hint or ""
+        if hint.startswith("target:"):
+            with betterwright.urllib.request.urlopen(f"http://127.0.0.1:{port}/json/list", timeout=5) as response:
+                tabs = json.load(response)
+            matches = [t for t in tabs if t.get("id") == hint[7:]]
+            if len(matches) != 1:
+                raise betterwright.BetterWrightError("Workflow tab disappeared; inspect tabs before continuing")
+            page_url = matches[0]["url"]
     reset_browser_session()
     code = str(args.get("code") or "")
     if args.get("dismiss_overlays", True):
         code = betterwright.DISMISS_OVERLAYS_JS + code
-    try:
-        result = betterwright.run_script(
-            port,
-            code,
-            timeout=float(args.get("timeout", 120)),
-        )
-    except betterwright.BetterWrightError as exc:
-        return str(exc)
+    options = {"timeout": float(args.get("timeout", 120))}
+    if args.get("dismiss_overlays") is False:
+        options["dismiss_overlays"] = False
+    if page_url:
+        options["page_url"] = page_url
+    result = betterwright.run_script(port, code, **options)
+    if not result.get("ok"):
+        raise betterwright.BetterWrightError(json.dumps(result, ensure_ascii=False))
     return f"port={port}\n" + json.dumps(result, ensure_ascii=False)
 
 
@@ -1100,7 +1127,7 @@ def tool_android_use(args: dict[str, Any]) -> str:
             goal,
             JevChooser(),
             act=act,
-            max_steps=int(args.get("max_steps", DEFAULT_MAX_STEPS)),
+            max_steps=max_steps,
             min_confidence=float(args.get("min_confidence", DEFAULT_MIN_CONFIDENCE)),
             settle=float(args.get("settle", ANDROID_DEFAULT_SETTLE)),
             writer=TextModel(),
@@ -1229,7 +1256,7 @@ def handle(request: dict[str, Any]) -> dict[str, Any] | None:
                 "id": request_id,
                 "result": {"content": [{"type": "text", "text": text}]},
             }
-        except DriverError as exc:
+        except (DriverError, betterwright.BetterWrightError) as exc:
             # A driver refusal is an operational message, not a crash: return it as
             # text so the caller acts on it instead of seeing a stack trace.
             return {
@@ -1275,6 +1302,18 @@ def main() -> int:
         log("warning: TYPESAFE_API_KEY is not set — browser_use will fail at the first decision")
     log(f"{SERVER_NAME} {SERVER_VERSION} ready (browser only)")
 
+    busy = threading.Event()
+    write_lock = threading.Lock()
+
+    def respond(request):
+        try:
+            response = handle(request)
+            if response is not None:
+                with write_lock:
+                    send(response)
+        finally:
+            busy.clear()
+
     for line in sys.stdin:
         line = line.strip()
         if not line:
@@ -1283,9 +1322,20 @@ def main() -> int:
             request = json.loads(line)
         except json.JSONDecodeError:
             continue
-        response = handle(request)
-        if response is not None:
-            send(response)
+        if request.get("method") == "tools/call":
+            if busy.is_set():
+                with write_lock:
+                    send({"jsonrpc": "2.0", "id": request.get("id"), "result": {
+                        "isError": True, "content": [{"type": "text", "text": "A tool is still running. Do not repeat actions; wait for its result."}]}})
+            else:
+                busy.set()
+                threading.Thread(target=respond, args=(request,), daemon=True).start()
+        else:
+            response = handle(request)
+            if response is not None:
+                with write_lock:
+                    send(response)
+    betterwright.close_sessions()
     return 0
 
 

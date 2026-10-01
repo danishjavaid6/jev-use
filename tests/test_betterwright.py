@@ -29,36 +29,38 @@ def test_ws_url_for_resolves_the_browser_endpoint(monkeypatch):
     assert seen == [("http://127.0.0.1:9222/json/version", 5.0)]
 
 
-def test_run_script_attaches_explicitly_and_disables_daemon(monkeypatch):
+def test_run_script_reuses_connection_and_sends_code_over_stdin(monkeypatch):
     monkeypatch.setattr(betterwright, "ws_url_for", lambda port: "ws://127.0.0.1:9222/devtools/browser/test")
-    calls = {}
+    class Tabs(_Response):
+        def read(self):
+            return b'[{"id":"tab1","type":"page","url":"about:blank"}]'
+    monkeypatch.setattr(betterwright.urllib.request, "urlopen", lambda *a, **k: Tabs())
+    calls = []
+    instances = []
 
-    class Completed:
-        returncode = 0
-        stdout = '{"ok": true, "result": "done"}'
-        stderr = ""
+    class Bridge:
+        def __init__(self, command):
+            instances.append(command)
+            self.process = type("Process", (), {"poll": lambda self: None})()
+        def run(self, request, timeout):
+            calls.append((request, timeout))
+            return {"ok": True, "result": "done"}
+        def close(self):
+            pass
 
-    def fake_run(argv, **kwargs):
-        calls["argv"] = argv
-        calls["kwargs"] = kwargs
-        return Completed()
+    monkeypatch.setattr(betterwright, "_Bridge", Bridge)
+    monkeypatch.setattr(betterwright, "_BRIDGES", {})
+    for code in ["state.count = 1; return state.count", "return state.count"]:
+        assert betterwright.run_script(9222, code, command="betterwright")["ok"]
+    assert instances == ["betterwright"]
+    assert calls[0][0]["code"].startswith("state.count")
+    assert calls[0][0]["ws"].endswith("/test")
 
-    monkeypatch.setattr(betterwright.subprocess, "run", fake_run)
 
-    result = betterwright.run_script(9222, "return page.url()", command="betterwright")
-
-    assert result["ok"] is True
-    assert calls["argv"] == [
-        "betterwright",
-        "run",
-        "--no-daemon",
-        "--browser",
-        "ws://127.0.0.1:9222/devtools/browser/test",
-        "--no-ad-block",
-        "-c",
-        "return page.url()",
-    ]
-    assert calls["kwargs"]["env"]["BETTERWRIGHT_NO_DAEMON"] == "1"
+@pytest.mark.parametrize("timeout", [0, -1, 901, float("nan"), float("inf")])
+def test_invalid_deadline_fails_before_attach(timeout):
+    with pytest.raises(betterwright.BetterWrightError, match="timeout"):
+        betterwright.run_script(9222, "return 1", timeout=timeout)
 
 
 def test_run_script_rejects_empty_code():

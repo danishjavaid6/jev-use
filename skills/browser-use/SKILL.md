@@ -40,16 +40,24 @@ Do not operate the same page the user is actively editing.
    `dismiss_overlays=false` to keep it open. Password forms and unrelated dialogs
    stay open. If this popup appears midway through a script, repeat the same
    scoped dialog close and wait for it to disappear before continuing.
-   Browser-owned credential popups may be absent from the page DOM. If a
-   screenshot shows a blocking popup but the dialog locator finds nothing,
-   stop and request manual dismissal; never repeatedly click behind the popup.
-   For
-   native JavaScript dialogs, prepare `dialogs.dismissNext()` or
-   `dialogs.acceptNext()` immediately before the action that opens the dialog.
-   When the MCP server is loaded, call `browser_script` directly. Do not run
-   `jev-use call browser_script` from the shell: that starts a second process
-   which cannot release the MCP server's existing CDP connection and can cause
-   a `connectOverCDP` timeout.
+   Browser-owned FedCM account chooser alerts are monitored over CDP on the
+   selected tab and dismissed when `dismiss_overlays=true`. Other browser UI is
+   not guaranteed to be accessible; report warnings and request manual dismissal
+   if it still blocks the task. Never repeatedly click behind a popup.
+   For native JavaScript dialogs, prepare `dialogs.dismissNext()` or
+   `dialogs.acceptNext()` before the action that opens it.
+   Scripts run through Node.js 22+ (no Bun PATH dependency), retain `state` and the
+   selected tab between calls, and use a hard timeout in seconds. If multiple tabs
+   exist on first attachment, pass `page_url` with the exact observed workflow URL.
+   Omit it afterward to retain the same tab through navigation.
+   Do not mix script and interactive tools during a prepared workflow: interactive
+   tools detach the script worker. Switching tools can also select another tab.
+   On a script attachment error, stop and report the error. Never infer that CDP
+   allows only one websocket, never launch a second shell driver as a workaround,
+   and never fall back to dozens of goal-based clicks. After a timeout, inspect
+   state before retrying: a submission may already have committed.
+   `settle` is SECONDS, limited to 0–10: use `5`, never `5000`. Stop after two
+   failed actions on the same control and inspect the real target.
    If the target is ambiguous or needs several steps without a prepared script, use
    `browser_use(port=N, goal="...", act=true)`: Jev chooses from real controls.
    Keep goals short; use `decompose=false` for a single step. Verify the result.

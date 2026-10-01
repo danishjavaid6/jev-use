@@ -1120,7 +1120,7 @@ def test_browser_script_uses_betterwright_without_starting_the_jev_transport(
     seen = {}
     released = []
 
-    def fake_run_script(port, code, *, timeout):
+    def fake_run_script(port, code, *, timeout, dismiss_overlays=True):
         seen.update(port=port, code=code, timeout=timeout)
         return {"ok": True, "result": "created"}
 

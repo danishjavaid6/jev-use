@@ -85,39 +85,40 @@ plans bypass Jev. Use `decompose=false` for one-step goals. Compound planning
 and generated text require a configured `JEV_USE_TEXT_MODEL`; an unavailable
 planner is skipped. Literal text supplied to `browser_action` needs no writer.
 
-For a known workflow, `browser_script` is the fast path. It runs one prepared
-Playwright snippet through BetterWright against the existing CDP browser, so it
-does not ask Jev to choose every click. Install BetterWright once with
-`bun install -g betterwright` and keep `browser_open(vendor="gologin")` as the
-process that launches GoLogin. BetterWright only attaches to that browser; call
-`browser_close` afterward so GoLogin saves the profile.
+For a known workflow, `browser_script` runs prepared Playwright through the
+BetterWright SDK, avoiding a model request per click. It uses Node.js 22+ and the
+installed BetterWright package; Bun is no longer required at execution time.
+GoLogin still launches and saves the original profile. Call `browser_close`
+afterward to save its state.
 
-Scripts dismiss recognized cookie/promotional overlays and Facebook's `Sign in
-as` chooser by clicking its scoped `Close` button and verifying it disappears.
-Use `dismiss_overlays=false` to keep the chooser open. Password forms and other
-dialogs stay open. Browser-owned credential popups outside the page DOM require
-manual dismissal; do not repeat clicks behind them. Prepare
-`dialogs.dismissNext()` or `dialogs.acceptNext()` immediately before a native
-JavaScript dialog action.
+The SDK connection, selected tab and `state` persist between script calls. If
+several tabs exist at first attachment, supply `page_url` with the exact existing
+workflow URL; omit it afterward to follow the same tab through navigation.
+Switching to interactive tools detaches the script worker, so keep a prepared
+workflow on the script path. A script failure is an MCP error, not a success.
+Do not replay a timed-out submission without checking whether it committed.
 
-For repeated account work, inspect the form once and run one script per account:
+Scripts dismiss recognized page overlays and the scoped Facebook `Sign in as`
+dialog. The selected tab also has native FedCM account chooser monitoring via
+CDP. Set `dismiss_overlays=false` to preserve these choosers. Password forms,
+other tabs and unrelated native dialogs are untouched. Unsupported native dialog
+monitoring is reported as a warning; other browser-owned UI may require manual
+dismissal. Prepare `dialogs.dismissNext()` or `dialogs.acceptNext()` before
+an action that opens a JavaScript dialog.
+
+Inspect selectors once, batch deterministic stretches, and observe when the form
+structure changes. A quick connection check requires no page mutation:
 
 ```js
-await page.goto("https://www.facebook.com");
-await page.getByRole("textbox", { name: /page name/i }).fill(pageName);
-await page.getByRole("combobox", { name: /category/i }).click();
-await page.getByText("Reel creator", { exact: true }).click();
-await page.getByRole("textbox", { name: /description/i }).fill(description);
-await page.getByRole("button", { name: /create page/i }).click();
-await page.waitForURL(/facebook\\.com/);
-return { created: true, url: page.url() };
+return { url: page.url(), title: await page.title(), stateAvailable: !!state };
 ```
 
-Do not call `browser_use` or agent-browser for every line of a known workflow;
-that reintroduces the model latency the script path is intended to remove. When
-the MCP server is connected, call `browser_script` directly; the shell fallback
-`jev-use call browser_script` runs in a separate process and cannot release the
-MCP server's existing CDP connection.
+Script deadlines are in seconds (1–900, default 120). `browser_use.settle` is
+also in seconds, limited to 0–10; `5000` is rejected immediately. The MCP server
+answers heartbeat and schema requests while a tool runs and refuses overlapping
+actions instead of silently queueing duplicate submissions. Attachment errors
+must be diagnosed from the returned error; they do not prove CDP supports only
+one websocket.
 
 Reads default to 6,000 characters per page; `max_chars` can raise this to 20,000.
 The harness receives 13 tool schemas, loaded skill instructions, and tool results;

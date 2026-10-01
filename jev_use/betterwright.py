@@ -2,12 +2,17 @@
 
 BetterWright is deliberately an optional execution path. GoLogin remains the
 process that launches Orbita and owns the profile; this module only resolves the
-existing debugger websocket and asks the BetterWright CLI to attach to it.
+existing debugger websocket and attaches the persistent BetterWright SDK to it.
 """
 
 from __future__ import annotations
 
 import json
+import atexit
+import math
+import queue
+import signal
+import threading
 import os
 import shutil
 import subprocess
@@ -39,9 +44,8 @@ if (/^https:\\/\\/(?:[^/]+\\.)?facebook\\.com(?:\\/|$)/i.test(page.url())) {
 
 
 INSTALL_HINT = (
-    "BetterWright is not installed. Install it once with:\n"
-    "    bun install -g betterwright\n"
-    "    betterwright setup"
+    "BetterWright is not installed. With Node.js 22+, install it once with:\n"
+    "    npm install -g betterwright"
 )
 
 
@@ -77,34 +81,9 @@ def executable() -> str | None:
 
 
 def _environment_for(command: str) -> dict[str, str]:
-    """Add BetterWright and Bun directories to PATH for Windows shims."""
+    """Preserve the host environment; Node's absolute path comes from the launcher."""
     env = os.environ.copy()
-    directories = [Path(command).parent]
-    for name in ("bun", "bun.cmd", "bun.exe"):
-        found = shutil.which(name)
-        if found:
-            directories.append(Path(found).parent)
-    for variable in ("APPDATA", "LOCALAPPDATA", "USERPROFILE"):
-        value = env.get(variable)
-        if value:
-            base = Path(value)
-            directories.extend((base / "npm", base / ".bun" / "bin", base / "AppData" / "Roaming" / "npm"))
-            # Bun installed through npm can keep the real executable below the
-            # global prefix while the top-level `bun` entry is only a shim.
-            node_modules = base / "npm" / "node_modules"
-            if node_modules.is_dir():
-                for candidate in node_modules.glob("bun*/**/bun.exe"):
-                    directories.append(candidate.parent)
-    bun_install = env.get("BUN_INSTALL")
-    if bun_install:
-        directories.append(Path(bun_install) / "bin")
-    current = env.get("PATH", "")
-    entries = [item for item in current.split(os.pathsep) if item]
-    for directory in reversed(directories):
-        text = str(directory)
-        if text and text not in entries:
-            entries.insert(0, text)
-    env["PATH"] = os.pathsep.join(entries)
+    env["PATH"] = str(Path(command).parent) + os.pathsep + env.get("PATH", "")
     return env
 
 
@@ -137,86 +116,126 @@ def ws_url_for(port: int, timeout: float = 5.0) -> str:
     return url
 
 
-def run_script(
-    port: int,
-    code: str,
-    *,
-    timeout: float = 120.0,
-    command: str | None = None,
-) -> dict[str, Any]:
-    """Run one prepared snippet against the browser on ``port``.
+class _Bridge:
+    """One SDK worker per browser, with a hard host-side deadline."""
 
-    ``--no-daemon`` makes the BetterWright client disconnect when this call ends;
-    GoLogin still owns the browser and its caller remains responsible for calling
-    ``Session.stop()`` so the profile is committed.
-    """
+    def __init__(self, command: str):
+        node = os.environ.get("JEV_USE_NODE") or shutil.which("node")
+        if not node:
+            raise BetterWrightError("Node.js 22+ is required for browser_script")
+        script = Path(__file__).resolve().parent.parent / "bin" / "betterwright-bridge.js"
+        self.process = subprocess.Popen(
+            [node, str(script)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, text=True, encoding="utf-8",
+            env=_environment_for(command),
+            start_new_session=os.name != "nt",
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
+        )
+        self.messages: queue.Queue = queue.Queue()
+        self.lock = threading.Lock()
+        self.sequence = 0
+        threading.Thread(target=self._read, daemon=True).start()
+
+    def _read(self):
+        try:
+            for line in self.process.stdout:
+                try:
+                    self.messages.put(json.loads(line))
+                except ValueError:
+                    continue
+        finally:
+            self.messages.put({"error": "BetterWright bridge exited. Check Node.js 22+ and the BetterWright installation."})
+
+    def run(self, request: dict, timeout: float) -> dict:
+        with self.lock:
+            self.sequence += 1
+            request["id"] = self.sequence
+            try:
+                self.process.stdin.write(json.dumps(request) + "\n")
+                self.process.stdin.flush()
+                response = self.messages.get(timeout=timeout)
+            except (queue.Empty, OSError) as exc:
+                self.close()
+                raise BetterWrightError(
+                    f"BetterWright exceeded its {timeout:g}s deadline or disconnected; "
+                    "the action may have committed. Inspect state before retrying."
+                ) from exc
+            if response.get("error"):
+                raise BetterWrightError(response["error"])
+            if response.get("id") != self.sequence or not isinstance(response.get("result"), dict):
+                self.close()
+                raise BetterWrightError("invalid BetterWright bridge response")
+            return response["result"]
+
+    def close(self):
+        # Only our Node bridge and SDK worker; never the externally launched browser.
+        if os.name == "nt":
+            if self.process.poll() is None:
+                subprocess.run(["taskkill", "/PID", str(self.process.pid), "/T", "/F"],
+                               capture_output=True, timeout=5, check=False)
+        else:
+            try:
+                os.killpg(self.process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+        try:
+            self.process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            self.process.kill()
+        for stream in (self.process.stdin, self.process.stdout):
+            if stream:
+                stream.close()
+
+
+_BRIDGES: dict[int, tuple[str, _Bridge]] = {}
+
+
+def close_sessions() -> None:
+    for _, bridge in list(_BRIDGES.values()):
+        bridge.close()
+    _BRIDGES.clear()
+
+
+atexit.register(close_sessions)
+
+
+def run_script(port: int, code: str, *, timeout: float = 120.0,
+               command: str | None = None, page_url: str | None = None,
+               dismiss_overlays: bool = True) -> dict[str, Any]:
+    """Reuse BetterWright's SDK connection and in-memory state between calls."""
     if not isinstance(code, str) or not code.strip():
         raise BetterWrightError("browser_script requires non-empty JavaScript code")
     if len(code) > 100_000:
         raise BetterWrightError("browser_script code is limited to 100000 characters")
-    if timeout <= 0 or timeout > 900:
+    if not math.isfinite(timeout) or not 1 <= timeout <= 900:
         raise BetterWrightError("browser_script timeout must be between 1 and 900 seconds")
-
     cli = command or executable()
     if not cli:
         raise BetterWrightError(INSTALL_HINT)
-
-    # The URL is obtained from the local browser itself. We never manufacture a
-    # debugger path, and the endpoint stays loopback-only for GoLogin profiles.
-    cdp_url = ws_url_for(int(port))
-    env = _environment_for(cli)
-    env["BETTERWRIGHT_NO_DAEMON"] = "1"
-    args = [
-        "run",
-        "--no-daemon",
-        "--browser",
-        cdp_url,
-        "--no-ad-block",
-        "-c",
-        code,
-    ]
+    ws = ws_url_for(int(port))
+    existing = _BRIDGES.get(port)
+    if existing and (existing[0] != ws or existing[1].process.poll() is not None):
+        existing[1].close()
+        del _BRIDGES[port]
+    target_id = None
+    tab_count = None
+    if port not in _BRIDGES or page_url:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/list", timeout=5) as response:
+            tabs = [t for t in json.load(response) if t.get("type") == "page"]
+        tab_count = len(tabs)
+        candidates = [t for t in tabs if t.get("url") == page_url] if page_url else tabs
+        if len(candidates) != 1:
+            raise BetterWrightError("Multiple or missing tabs: supply page_url with the exact existing workflow tab URL")
+        target_id = candidates[0]["id"]
+        page_url = candidates[0]["url"]
+    if port not in _BRIDGES:
+        _BRIDGES[port] = (ws, _Bridge(cli))
     try:
-        result = subprocess.run(
-            [cli, *args],
-            capture_output=True,
-            text=True,
-            timeout=float(timeout),
-            check=False,
-            env=env,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise BetterWrightError(
-            f"BetterWright timed out after {timeout:g}s; the action may have committed"
-        ) from exc
-    except OSError as exc:
-        raise BetterWrightError(f"could not start BetterWright: {exc}") from exc
-
-    stdout = (result.stdout or "").strip()
-    stderr = (result.stderr or "").strip()
-    if result.returncode != 0:
-        detail = stderr or stdout or f"exit {result.returncode}"
-        raise BetterWrightError(f"BetterWright failed: {detail[-4000:]}")
-
-    # The CLI emits one JSON envelope. Keep a useful fallback for versions that
-    # prefix diagnostics, while never treating arbitrary text as success silently.
-    try:
-        payload = json.loads(stdout)
-    except json.JSONDecodeError:
-        lines = [line for line in stdout.splitlines() if line.strip()]
-        payload = None
-        for line in reversed(lines):
-            try:
-                payload = json.loads(line)
-                break
-            except json.JSONDecodeError:
-                continue
-        if payload is None:
-            raise BetterWrightError(
-                f"BetterWright returned non-JSON output: {stdout[-4000:]}"
-            )
-
-    if not isinstance(payload, dict):
-        raise BetterWrightError("BetterWright returned an invalid result envelope")
-    if stderr:
-        payload.setdefault("hostStderr", stderr[-4000:])
-    return payload
+        return _BRIDGES[port][1].run(
+            {"ws": ws, "cli": cli, "code": code, "timeout": timeout, "page_url": page_url, "target_id": target_id, "tab_count": tab_count, "dismiss_overlays": dismiss_overlays}, timeout)
+    except BetterWrightError:
+        # Do not reuse a timed-out worker or replay possibly committed actions.
+        failed = _BRIDGES.pop(port, None)
+        if failed:
+            failed[1].close()
+        raise

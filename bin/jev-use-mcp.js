@@ -37,7 +37,7 @@ async function main() {
     process.exit(1);
   }
 
-  const env = { ...process.env, ...config.readEnvFile(), PYTHONUTF8: '1', PYTHONUNBUFFERED: '1' };
+  const env = { ...process.env, ...config.readEnvFile(), JEV_USE_NODE: process.execPath, PYTHONUTF8: '1', PYTHONUNBUFFERED: '1' };
 
   const child = spawn(python, ['-u', '-m', 'jev_use.mcp_server'], {
     stdio: 'inherit',
