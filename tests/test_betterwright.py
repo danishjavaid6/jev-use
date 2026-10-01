@@ -65,3 +65,12 @@ def test_run_script_rejects_empty_code():
     with pytest.raises(betterwright.BetterWrightError, match="non-empty"):
         betterwright.run_script(9222, "", command="betterwright")
 
+
+def test_environment_for_adds_a_shim_directory_to_path(monkeypatch, tmp_path):
+    monkeypatch.setenv("PATH", "/system/bin")
+    command = tmp_path / "betterwright.cmd"
+
+    env = betterwright._environment_for(str(command))
+
+    assert env["PATH"].startswith(str(tmp_path))
+    assert "/system/bin" in env["PATH"]

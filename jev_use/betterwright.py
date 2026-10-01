@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import urllib.error
 import urllib.request
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
@@ -29,12 +30,44 @@ INSTALL_HINT = (
 
 
 def executable() -> str | None:
-    """Return the global BetterWright executable, including Windows shims."""
+    """Return the global BetterWright executable, including Windows shims.
+
+    MCP hosts on Windows often start with a reduced PATH. Bun's global npm
+    directory is nevertheless stable, so check it explicitly after PATH lookup.
+    """
     for name in ("betterwright", "betterwright.cmd", "betterwright.exe"):
         found = shutil.which(name)
         if found:
             return found
+    roots: list[Path] = []
+    for variable in ("APPDATA", "LOCALAPPDATA", "USERPROFILE"):
+        value = os.environ.get(variable)
+        if value:
+            base = Path(value)
+            roots.extend((base / "npm", base / ".bun" / "bin", base / "AppData" / "Roaming" / "npm"))
+    bun_install = os.environ.get("BUN_INSTALL")
+    if bun_install:
+        roots.append(Path(bun_install) / "bin")
+    seen: set[Path] = set()
+    for root in roots:
+        if root in seen:
+            continue
+        seen.add(root)
+        for name in ("betterwright.cmd", "betterwright.exe", "betterwright"):
+            candidate = root / name
+            if candidate.is_file():
+                return str(candidate)
     return None
+
+
+def _environment_for(command: str) -> dict[str, str]:
+    """Add the command's directory to PATH for Bun/npm shims on Windows."""
+    env = os.environ.copy()
+    directory = str(Path(command).parent)
+    current = env.get("PATH", "")
+    if directory and directory not in current.split(os.pathsep):
+        env["PATH"] = directory + (os.pathsep + current if current else "")
+    return env
 
 
 def ws_url_for(port: int, timeout: float = 5.0) -> str:
@@ -93,7 +126,7 @@ def run_script(
     # The URL is obtained from the local browser itself. We never manufacture a
     # debugger path, and the endpoint stays loopback-only for GoLogin profiles.
     cdp_url = ws_url_for(int(port))
-    env = os.environ.copy()
+    env = _environment_for(cli)
     env["BETTERWRIGHT_NO_DAEMON"] = "1"
     args = [
         "run",
