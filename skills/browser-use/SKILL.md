@@ -9,11 +9,15 @@ system mouse or keyboard; keep using the returned port while the user works in
 other windows. Never bring the browser to the foreground or use OS input.
 Known URLs use dedicated background tabs without activating them; the user can
 select those tabs to watch. Launching a visible browser may briefly take focus.
-Only use Chrome `background=true` or GoLogin `headless=true` if requested.
+Always pass `headless=false` when opening Chrome or GoLogin unless the user
+explicitly requests headless. `background` is a legacy option, not headless mode.
+An already-running headless browser cannot become visible through an action:
+explain that it needs closing and reopening; do not silently reuse it if the
+user wants a visible browser. Never kill an unrelated browser to do this.
 Do not operate the same page the user is actively editing.
 
 1. Call `browser_profiles` once. Reuse the matching live CDP port.
-2. If closed, call `browser_open(profile="name")` once and use its returned port.
+2. If closed, call `browser_open(profile="name", headless=false)` once and use its returned port.
    Use `vendor="gologin"` for GoLogin; never copy it into Chrome.
    For a public task with no requested account, use Chrome's Default profile.
    For an account task with several possible profiles, ask which account.
@@ -32,7 +36,7 @@ If MCP tools are missing, search once, then use the built-in shell fallback:
 
 ```text
 jev-use call browser_profiles
-jev-use call browser_open --profile Default
+jev-use call browser_open --profile Default --no-headless
 jev-use call browser_read --port 9222 --url https://example.com
 jev-use call browser_action --port 9222 --action click --label Save
 jev-use call browser_use --port 9222 --goal "open billing" --act

@@ -91,8 +91,11 @@ harness's tool discovery and tokenizer.
 
 ## Background work
 
-`browser_open` launches a visible browser by default. Chrome `background=true`
-opts into headless mode. Opening a visible window may briefly take focus; ongoing
+`browser_open` launches a visible browser by default. Only explicit `headless=true`
+opts into headless mode, for Chrome or GoLogin. Legacy `background=true` no longer
+hides the browser. The shell fallback accepts `--no-headless` for visible mode.
+An existing headless session must be closed and reopened to show a window.
+Opening a visible window may briefly take focus; ongoing
 CDP actions do not bring it to the foreground. Known URL tasks use a dedicated background tab; parallel reads pin
 each tab by ID. CDP actions do not move the system mouse or send OS keystrokes,
 so the user can work in other windows. Do not automate the same page the user

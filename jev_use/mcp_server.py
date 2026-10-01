@@ -407,9 +407,9 @@ TOOLS: list[dict[str, Any]] = [
                 "headless": {
                     "type": "boolean",
                     "default": False,
-                    "description": "GoLogin only: start Orbita without a visible window.",
+                    "description": "Hide the browser ONLY when the user explicitly requests headless. Default false keeps Chrome and GoLogin visible; CDP actions do not use OS input.",
                 },
-                "background": {"type": "boolean", "default": False, "description": "Chrome only: false (default) shows the browser; true runs headless. CDP actions do not use the system mouse or keyboard."},
+                "background": {"type": "boolean", "default": False, "description": "Legacy option: does not hide the browser. Background CDP automation stays visible and does not use the system mouse or keyboard. Use headless only if explicitly requested."},
                 "refresh": {
                     "type": "boolean",
                     "default": False,
@@ -769,7 +769,7 @@ def _open_gologin(wanted: str, args: dict[str, Any]) -> str:
             match,
             port=_port(args),
             url=None if url in ("", "about:blank") else url,
-            headless=bool(args.get("headless", False)),
+            headless=args.get("headless") is True,
         )
     except gologin.GoLoginError as exc:
         return str(exc)
@@ -824,7 +824,7 @@ def tool_browser_open(args: dict[str, Any]) -> str:
             port=port,
             refresh=bool(args.get("refresh", False)),
             url=str(args.get("url") or "about:blank"),
-            background=bool(args.get("background", False)),
+            background=args.get("headless") is True,
         )
     except (TimeoutError, FileNotFoundError, RuntimeError) as exc:
         return str(exc)

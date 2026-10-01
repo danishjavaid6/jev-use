@@ -11,6 +11,7 @@ def main() -> int:
         parser.add_argument("--" + name)
     parser.add_argument("--port", type=int)
     parser.add_argument("--act", action="store_true", default=None)
+    parser.add_argument("--headless", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--json-file", help="Advanced arguments as JSON in a file; avoids shell quoting.")
     options = vars(parser.parse_args())
     tool = options.pop("tool")

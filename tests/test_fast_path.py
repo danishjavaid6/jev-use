@@ -78,7 +78,10 @@ def test_background_tab_is_pinned_by_id_without_activation():
     assert not any(method in ("Target.activateTarget", "Page.bringToFront") for method, _, _ in fake.calls)
 
 
-@pytest.mark.parametrize("options,expected", [({}, False), ({"background": True}, True)])
+@pytest.mark.parametrize("options,expected", [
+    ({}, False), ({"background": True}, False), ({"headless": False}, False),
+    ({"headless": "false"}, False), ({"headless": True}, True),
+])
 def test_browser_open_visible_by_default_with_headless_opt_in(monkeypatch, options, expected):
     profile = profiles.LocalProfile(directory="Default", name="Default", prepared=True)
     monkeypatch.setattr(mcp_server, "find_profile", lambda _: profile)
