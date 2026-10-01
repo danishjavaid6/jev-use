@@ -1,0 +1,151 @@
+"""Run deterministic Playwright snippets against an existing CDP browser.
+
+BetterWright is deliberately an optional execution path. GoLogin remains the
+process that launches Orbita and owns the profile; this module only resolves the
+existing debugger websocket and asks the BetterWright CLI to attach to it.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import subprocess
+import urllib.error
+import urllib.request
+from typing import Any
+from urllib.parse import urlparse
+
+
+class BetterWrightError(RuntimeError):
+    """A BetterWright attachment or snippet failure."""
+
+
+INSTALL_HINT = (
+    "BetterWright is not installed. Install it once with:\n"
+    "    bun install -g betterwright\n"
+    "    betterwright setup"
+)
+
+
+def executable() -> str | None:
+    """Return the global BetterWright executable, including Windows shims."""
+    for name in ("betterwright", "betterwright.cmd", "betterwright.exe"):
+        found = shutil.which(name)
+        if found:
+            return found
+    return None
+
+
+def ws_url_for(port: int, timeout: float = 5.0) -> str:
+    """Resolve a local CDP port to the browser websocket endpoint."""
+    try:
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{int(port)}/json/version", timeout=timeout
+        ) as response:
+            payload = json.loads(response.read().decode("utf-8", "replace"))
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        raise BetterWrightError(
+            f"port {port} is not answering /json/version ({exc})"
+        ) from exc
+    url = (payload or {}).get("webSocketDebuggerUrl")
+    if not isinstance(url, str) or not url:
+        raise BetterWrightError(
+            f"port {port} answered /json/version without webSocketDebuggerUrl"
+        )
+    parsed = urlparse(url)
+    if parsed.scheme not in {"ws", "wss"} or parsed.hostname not in {
+        "127.0.0.1",
+        "localhost",
+        "::1",
+    }:
+        raise BetterWrightError(
+            "refusing a non-loopback BetterWright endpoint; GoLogin attachment "
+            "must stay local"
+        )
+    return url
+
+
+def run_script(
+    port: int,
+    code: str,
+    *,
+    timeout: float = 120.0,
+    command: str | None = None,
+) -> dict[str, Any]:
+    """Run one prepared snippet against the browser on ``port``.
+
+    ``--no-daemon`` makes the BetterWright client disconnect when this call ends;
+    GoLogin still owns the browser and its caller remains responsible for calling
+    ``Session.stop()`` so the profile is committed.
+    """
+    if not isinstance(code, str) or not code.strip():
+        raise BetterWrightError("browser_script requires non-empty JavaScript code")
+    if len(code) > 100_000:
+        raise BetterWrightError("browser_script code is limited to 100000 characters")
+    if timeout <= 0 or timeout > 900:
+        raise BetterWrightError("browser_script timeout must be between 1 and 900 seconds")
+
+    cli = command or executable()
+    if not cli:
+        raise BetterWrightError(INSTALL_HINT)
+
+    # The URL is obtained from the local browser itself. We never manufacture a
+    # debugger path, and the endpoint stays loopback-only for GoLogin profiles.
+    cdp_url = ws_url_for(int(port))
+    env = os.environ.copy()
+    env["BETTERWRIGHT_NO_DAEMON"] = "1"
+    args = [
+        "run",
+        "--no-daemon",
+        "--browser",
+        cdp_url,
+        "--no-ad-block",
+        "-c",
+        code,
+    ]
+    try:
+        result = subprocess.run(
+            [cli, *args],
+            capture_output=True,
+            text=True,
+            timeout=float(timeout),
+            check=False,
+            env=env,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise BetterWrightError(
+            f"BetterWright timed out after {timeout:g}s; the action may have committed"
+        ) from exc
+    except OSError as exc:
+        raise BetterWrightError(f"could not start BetterWright: {exc}") from exc
+
+    stdout = (result.stdout or "").strip()
+    stderr = (result.stderr or "").strip()
+    if result.returncode != 0:
+        detail = stderr or stdout or f"exit {result.returncode}"
+        raise BetterWrightError(f"BetterWright failed: {detail[-4000:]}")
+
+    # The CLI emits one JSON envelope. Keep a useful fallback for versions that
+    # prefix diagnostics, while never treating arbitrary text as success silently.
+    try:
+        payload = json.loads(stdout)
+    except json.JSONDecodeError:
+        lines = [line for line in stdout.splitlines() if line.strip()]
+        payload = None
+        for line in reversed(lines):
+            try:
+                payload = json.loads(line)
+                break
+            except json.JSONDecodeError:
+                continue
+        if payload is None:
+            raise BetterWrightError(
+                f"BetterWright returned non-JSON output: {stdout[-4000:]}"
+            )
+
+    if not isinstance(payload, dict):
+        raise BetterWrightError("BetterWright returned an invalid result envelope")
+    if stderr:
+        payload.setdefault("hostStderr", stderr[-4000:])
+    return payload

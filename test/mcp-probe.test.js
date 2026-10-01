@@ -67,7 +67,7 @@ test('real Node-to-Python launcher discovers browser and mobile tools outside pr
   const real = { command: process.execPath, args: [path.resolve(__dirname, '..', 'bin', 'jev-use-mcp.js')] };
   const result = await probe(real, { cwd: os.tmpdir() });
   assert.equal(result.ok, true, result.error);
-  assert.equal(result.tools.length, 12);
+  assert.equal(result.tools.length, 13);
   assert.ok(result.tools.includes('browser_profiles'));
   assert.ok(result.tools.includes('browser_action'));
   assert.ok(result.tools.includes('android_use'));

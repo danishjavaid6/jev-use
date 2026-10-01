@@ -9,6 +9,7 @@ every turn:
     browser_profiles   which Chromium-family browsers are open, and whether CDP works
     browser_open       launch a profile from a private copy, with a CDP endpoint
     browser_use        drive the page toward a goal; Jev picks each action
+    browser_script     run a prepared BetterWright Playwright workflow in one call
     browser_extract    ask typed questions about the page, get typed answers
     browser_read       return the page's text
 
@@ -48,7 +49,7 @@ from pathlib import Path
 from typing import Any
 
 from .browser import DEFAULT_PROFILE, attach, read as browser_read, run as browser_run
-from .browser import running_profiles, cdp_alive
+from .browser import running_profiles, cdp_alive, _pick_profile
 from .browser import navigate_and_settle, read_many as browser_read_many
 from .choosers import JevChooser
 from .cache import PlanCache
@@ -61,6 +62,7 @@ from .text_model import TextModel
 from . import android as android_engine
 from . import gologin
 from . import harness
+from . import betterwright
 
 SERVER_NAME = "jev-use"
 SERVER_VERSION = "0.3.0"
@@ -296,7 +298,9 @@ PROMPT_TEMPLATE = """Task: {task}
 Call browser_profiles once; reuse the matching port or browser_open the requested profile.
 For a known URL use browser_read(port=N, url=...) directly. For several URLs use
 browser_read_many. For one exact click/fill/scroll use browser_action; for ambiguous
-or multi-step goals use browser_use with Jev, then read to verify.
+or multi-step goals use browser_use with Jev, then read to verify. For a known
+multi-step form, use browser_script with one prepared BetterWright Playwright
+snippet instead of spending a model turn on every click.
 Never substitute a different browser for a requested account. GoLogin needs
 vendor=\"gologin\" and browser_close afterward.
 If tools are missing, search once then use `jev-use call <tool>` in the shell.
@@ -486,6 +490,40 @@ TOOLS: list[dict[str, Any]] = [
                 "profile": {"type": "string"},
             },
             "required": ["action"],
+        },
+    },
+    {
+        "name": "browser_script",
+        "description": (
+            "Run one prepared BetterWright Playwright script against the existing "
+            "browser. Use this fast deterministic path for known forms and workflows; "
+            "it attaches to the GoLogin CDP browser and does not launch another browser."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "type": "string",
+                    "description": (
+                        "Playwright JavaScript executed by BetterWright. Use page, "
+                        "snapshot, human, and screenshot; return a short JSON-safe result."
+                    ),
+                },
+                "port": {
+                    "type": "integer",
+                    "description": "CDP port returned by browser_open.",
+                },
+                "profile": {
+                    "type": "string",
+                    "description": "Running profile when an explicit port is unavailable.",
+                },
+                "timeout": {
+                    "type": "number",
+                    "default": 120,
+                    "description": "Maximum script time in seconds, from 1 to 900.",
+                },
+            },
+            "required": ["code"],
         },
     },
     {
@@ -982,6 +1020,26 @@ def tool_browser_read_many(args: dict[str, Any]) -> str:
     return header + "\n\n" + "\n\n---\n\n".join(blocks)
 
 
+def tool_browser_script(args: dict[str, Any]) -> str:
+    """Run a deterministic BetterWright script without invoking Jev per action."""
+    port = _port(args)
+    if port is None:
+        wanted = args.get("profile")
+        chosen, problem = _pick_profile(running_profiles(), wanted)
+        if chosen is None or chosen.port is None:
+            return problem or "no running CDP browser matched the requested profile"
+        port = chosen.port
+    try:
+        result = betterwright.run_script(
+            port,
+            str(args.get("code") or ""),
+            timeout=float(args.get("timeout", 120)),
+        )
+    except betterwright.BetterWrightError as exc:
+        return str(exc)
+    return f"port={port}\n" + json.dumps(result, ensure_ascii=False)
+
+
 # -- android ----------------------------------------------------------------
 
 
@@ -1072,6 +1130,7 @@ HANDLERS = {
     "browser_close": tool_browser_close,
     "browser_use": tool_browser_use,
     "browser_action": tool_browser_action,
+    "browser_script": tool_browser_script,
     "browser_extract": tool_browser_extract,
     "browser_read": tool_browser_read,
     "browser_read_many": tool_browser_read_many,

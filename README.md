@@ -74,6 +74,7 @@ with the requested profile. Use its returned port in later calls.
 | Click an exact label | `browser_action(port=N, action="click", label="Save")` | No |
 | Fill an exact field | `browser_action(port=N, action="fill", label="Email", text="...")` | No |
 | Scroll/back | `browser_action(port=N, action="scroll_down")` or `action="back"` | No |
+| Prepared multi-step workflow | `browser_script(port=N, code="...")` | No |
 | Ambiguous or multi-step goal | `browser_use(port=N, goal="...", act=true)` | Yes, when needed |
 | Extract typed answers | `browser_extract(port=N, questions={...})` | Yes |
 
@@ -84,8 +85,15 @@ plans bypass Jev. Use `decompose=false` for one-step goals. Compound planning
 and generated text require a configured `JEV_USE_TEXT_MODEL`; an unavailable
 planner is skipped. Literal text supplied to `browser_action` needs no writer.
 
+For a known workflow, `browser_script` is the fast path. It runs one prepared
+Playwright snippet through BetterWright against the existing CDP browser, so it
+does not ask Jev to choose every click. Install BetterWright once with
+`bun install -g betterwright` and keep `browser_open(vendor="gologin")` as the
+process that launches GoLogin. BetterWright only attaches to that browser; call
+`browser_close` afterward so GoLogin saves the profile.
+
 Reads default to 6,000 characters per page; `max_chars` can raise this to 20,000.
-The harness receives 12 tool schemas, loaded skill instructions, and tool results;
+The harness receives 13 tool schemas, loaded skill instructions, and tool results;
 it does not receive the project source. Actual context usage depends on the
 harness's tool discovery and tokenizer.
 

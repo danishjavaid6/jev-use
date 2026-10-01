@@ -27,7 +27,12 @@ Do not operate the same page the user is actively editing.
 4. Exact action: `browser_action(port=N, action="click", label="Save")` or
    `action="fill", label="Email", text="user@example.com"`. Scroll uses
    `action="scroll_down"`. This acts once and returns text without a Jev call.
-   If the target is ambiguous or needs several steps, use
+   For a known multi-step form or workflow, prefer `browser_script` with one
+   prepared BetterWright Playwright snippet. It attaches to the returned port,
+   does not launch another browser, and avoids a model round-trip per click.
+   Install it once with `bun install -g betterwright`; use `browser_script` only
+   after the page's selectors are known and verify its returned result.
+   If the target is ambiguous or needs several steps without a prepared script, use
    `browser_use(port=N, goal="...", act=true)`: Jev chooses from real controls.
    Keep goals short; use `decompose=false` for a single step. Verify the result.
 5. After a GoLogin task call `browser_close()` to save its state.
@@ -39,6 +44,7 @@ jev-use call browser_profiles
 jev-use call browser_open --profile Default --no-headless
 jev-use call browser_read --port 9222 --url https://example.com
 jev-use call browser_action --port 9222 --action click --label Save
+jev-use call browser_script --port 9222 --json-file workflow.json
 jev-use call browser_use --port 9222 --goal "open billing" --act
 ```
 

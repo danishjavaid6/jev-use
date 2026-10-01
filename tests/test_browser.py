@@ -1094,6 +1094,7 @@ def test_surface_is_browser_and_android_only() -> None:
         "browser_close",
         "browser_use",
         "browser_action",
+        "browser_script",
         "browser_extract",
         "browser_read",
         "browser_read_many",
@@ -1111,6 +1112,25 @@ def test_every_tool_has_a_description_and_schema() -> None:
     for tool in mcp_server.TOOLS:
         assert tool["description"]
         assert tool["inputSchema"]["type"] == "object"
+
+
+def test_browser_script_uses_betterwright_without_starting_the_jev_transport(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen = {}
+
+    def fake_run_script(port, code, *, timeout):
+        seen.update(port=port, code=code, timeout=timeout)
+        return {"ok": True, "result": "created"}
+
+    monkeypatch.setattr(mcp_server.betterwright, "run_script", fake_run_script)
+
+    result = mcp_server.tool_browser_script(
+        {"port": 12345, "code": "return page.title()", "timeout": 30}
+    )
+
+    assert seen == {"port": 12345, "code": "return page.title()", "timeout": 30.0}
+    assert '"result": "created"' in result
 
 
 def test_browser_profiles_is_advertised_as_the_first_call() -> None:
