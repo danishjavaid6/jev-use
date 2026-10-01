@@ -92,6 +92,22 @@ does not ask Jev to choose every click. Install BetterWright once with
 process that launches GoLogin. BetterWright only attaches to that browser; call
 `browser_close` afterward so GoLogin saves the profile.
 
+For repeated account work, inspect the form once and run one script per account:
+
+```js
+await page.goto("https://www.facebook.com");
+await page.getByRole("textbox", { name: /page name/i }).fill(pageName);
+await page.getByRole("combobox", { name: /category/i }).click();
+await page.getByText("Reel creator", { exact: true }).click();
+await page.getByRole("textbox", { name: /description/i }).fill(description);
+await page.getByRole("button", { name: /create page/i }).click();
+await page.waitForURL(/facebook\\.com/);
+return { created: true, url: page.url() };
+```
+
+Do not call `browser_use` or agent-browser for every line of a known workflow;
+that reintroduces the model latency the script path is intended to remove.
+
 Reads default to 6,000 characters per page; `max_chars` can raise this to 20,000.
 The harness receives 13 tool schemas, loaded skill instructions, and tool results;
 it does not receive the project source. Actual context usage depends on the

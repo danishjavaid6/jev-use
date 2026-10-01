@@ -297,10 +297,12 @@ PROMPT_NAME = "browser-use"
 PROMPT_TEMPLATE = """Task: {task}
 Call browser_profiles once; reuse the matching port or browser_open the requested profile.
 For a known URL use browser_read(port=N, url=...) directly. For several URLs use
-browser_read_many. For one exact click/fill/scroll use browser_action; for ambiguous
-or multi-step goals use browser_use with Jev, then read to verify. For a known
-multi-step form, use browser_script with one prepared BetterWright Playwright
-snippet instead of spending a model turn on every click.
+browser_read_many. For one exact click/fill/scroll use browser_action. For any
+repeated account, login, form, wizard, or checkout workflow, MUST use one
+browser_script call per account with a prepared BetterWright Playwright snippet;
+do not spend a model turn on every click and do not switch to agent-browser.
+Use browser_use with Jev only when the controls are genuinely unknown or the
+prepared script failed and needs one short recovery step. Verify the script result.
 Never substitute a different browser for a requested account. GoLogin needs
 vendor=\"gologin\" and browser_close afterward.
 If tools are missing, search once then use `jev-use call <tool>` in the shell.

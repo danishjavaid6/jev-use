@@ -27,11 +27,13 @@ Do not operate the same page the user is actively editing.
 4. Exact action: `browser_action(port=N, action="click", label="Save")` or
    `action="fill", label="Email", text="user@example.com"`. Scroll uses
    `action="scroll_down"`. This acts once and returns text without a Jev call.
-   For a known multi-step form or workflow, prefer `browser_script` with one
-   prepared BetterWright Playwright snippet. It attaches to the returned port,
-   does not launch another browser, and avoids a model round-trip per click.
-   Install it once with `bun install -g betterwright`; use `browser_script` only
-   after the page's selectors are known and verify its returned result.
+   For any repeated login, account switch, form, wizard, or checkout workflow,
+   **MUST use `browser_script`** with one prepared BetterWright Playwright
+   snippet per account. It attaches to the returned port, does not launch
+   another browser, and avoids a model round-trip per click. Inspect once if
+   selectors are unknown, then write the script and run it. Do not switch to
+   agent-browser for the same page. Install it once with
+   `bun install -g betterwright` and verify the script result.
    If the target is ambiguous or needs several steps without a prepared script, use
    `browser_use(port=N, goal="...", act=true)`: Jev chooses from real controls.
    Keep goals short; use `decompose=false` for a single step. Verify the result.
