@@ -32,3 +32,25 @@ test('leaves other tabs, password flows and disabled dismissal untouched', () =>
   watcher.receive({ method: 'FedCm.dialogShown', sessionId: 'chosen-session', params: { dialogType: 'AccountChooser', dialogId: 'd' } });
   assert.equal(sent.length, 0);
 });
+
+test('Windows chooser starts a scoped helper and stops when dismissal is disabled', () => {
+  const { EventEmitter } = require('node:events');
+  const { PassThrough } = require('node:stream');
+  const { WindowsChooser } = require('../bin/windows-chooser');
+  let command;
+  let args;
+  let killed = false;
+  const chooser = new WindowsChooser(14771, (cmd, argv) => {
+    command = cmd; args = argv;
+    const child = new EventEmitter();
+    child.stdout = new PassThrough();
+    child.kill = () => { killed = true; };
+    return child;
+  }, 'win32');
+  chooser.toggle(true);
+  assert.equal(command, 'powershell.exe');
+  assert.equal(args.at(-1), '14771');
+  assert.ok(args.some(arg => arg.endsWith('dismiss-account-chooser.ps1')));
+  chooser.toggle(false);
+  assert.equal(killed, true);
+});

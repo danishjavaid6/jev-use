@@ -24,4 +24,11 @@ jobs:
         run: .venv\Scripts\python.exe -m pip install -e .
       - if: runner.os != 'Windows'
         run: .venv/bin/python -m pip install -e .
-      - run: node --test test/mcp-probe.test.js test/native-dialogs.test.js
+      - run: node --test test/mcp-probe.test.js test/native-dialogs.test.js test/workflow-helpers.test.js
+      - if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PWD 'bin/dismiss-account-chooser.ps1'), [ref]$tokens, [ref]$errors) | Out-Null
+          if ($errors.Count) { $errors | Format-List; exit 1 }

@@ -201,7 +201,7 @@ atexit.register(close_sessions)
 
 def run_script(port: int, code: str, *, timeout: float = 120.0,
                command: str | None = None, page_url: str | None = None,
-               dismiss_overlays: bool = True) -> dict[str, Any]:
+               dismiss_overlays: bool = True, checkpoint_scope: str | None = None) -> dict[str, Any]:
     """Reuse BetterWright's SDK connection and in-memory state between calls."""
     if not isinstance(code, str) or not code.strip():
         raise BetterWrightError("browser_script requires non-empty JavaScript code")
@@ -232,7 +232,7 @@ def run_script(port: int, code: str, *, timeout: float = 120.0,
         _BRIDGES[port] = (ws, _Bridge(cli))
     try:
         return _BRIDGES[port][1].run(
-            {"ws": ws, "cli": cli, "code": code, "timeout": timeout, "page_url": page_url, "target_id": target_id, "tab_count": tab_count, "dismiss_overlays": dismiss_overlays}, timeout)
+            {"ws": ws, "cli": cli, "code": code, "timeout": timeout, "page_url": page_url, "target_id": target_id, "tab_count": tab_count, "dismiss_overlays": dismiss_overlays, "checkpoint_scope": checkpoint_scope}, timeout)
     except BetterWrightError:
         # Do not reuse a timed-out worker or replay possibly committed actions.
         failed = _BRIDGES.pop(port, None)

@@ -18,7 +18,7 @@ HTML = b'''<button id="account" onclick="setTimeout(()=>document.getElementById(
 
 
 @pytest.mark.skipif(not os.environ.get('JEV_TEST_CHROME'), reason='set JEV_TEST_CHROME for actual SDK/CDP test')
-def test_persistent_sdk_login_alert_and_hard_timeout():
+def test_persistent_sdk_login_alert_and_hard_timeout(monkeypatch):
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             self.send_response(200)
@@ -32,6 +32,7 @@ def test_persistent_sdk_login_alert_and_hard_timeout():
         sock.bind(('127.0.0.1', 0))
         port = sock.getsockname()[1]
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+        monkeypatch.setenv("JEV_USE_WORKFLOW_DIR", os.path.join(folder, "journal"))
         browser = subprocess.Popen([os.environ['JEV_TEST_CHROME'], '--headless=new', '--no-sandbox',
             f'--user-data-dir={folder}', f'--remote-debugging-port={port}', 'about:blank'],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -50,6 +51,10 @@ def test_persistent_sdk_login_alert_and_hard_timeout():
             assert result['ok'], result
             assert result['result'] == 42
             assert betterwright._BRIDGES[port][1].process.pid == pid
+            # A submission reservation survives bridge teardown, including timeouts.
+            reserve = betterwright.run_script(port, "workflow.begin('fixture-run','fixture-account'); workflow.status().browsed=true; return workflow.beforeCreate('Fixture Page')", timeout=30)
+            assert reserve['ok'], reserve
+            assert reserve['result']['stage'] == 'submission_reserved'
             # A second CDP client is supported: do not diagnose single-websocket ownership.
             from jev_use.harness import Harness
             harness = Harness(port=port)
@@ -60,13 +65,17 @@ def test_persistent_sdk_login_alert_and_hard_timeout():
                 harness.close()
             started = time.monotonic()
             with pytest.raises(betterwright.BetterWrightError, match='deadline'):
-                betterwright.run_script(port, "await page.locator('#never').waitFor({timeout:60000})", timeout=1)
+                betterwright.run_script(port, "await workflow.submitCreation({selector:'#account'}); await page.locator('#never').waitFor({timeout:60000})", timeout=1)
             assert time.monotonic() - started < 8
             assert port not in betterwright._BRIDGES
-            assert betterwright.ws_url_for(port)  # Browser survives transport teardown.
+            assert betterwright.ws_url_for(port)  # Browser survives a failed script.
             result = betterwright.run_script(port, 'return page.url()', timeout=30)
             assert result['ok'], result
             assert result['result'] == url
+            result = betterwright.run_script(port, "workflow.begin('fixture-run','fixture-account'); await workflow.submitCreation({selector:'#account'}); return 'must not run'", timeout=30)
+            assert not result['ok']
+            assert 'only be attempted once' in result['error']
+            assert any(item['stage'] == 'submitting' for item in result['workflowCheckpoints'].values())
             harness = Harness(port=port)
             harness.start()
             try:

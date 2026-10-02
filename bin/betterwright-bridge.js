@@ -6,6 +6,10 @@ const fs = require('node:fs');
 const { pathToFileURL } = require('node:url');
 const { createRequire } = require('node:module');
 const { watchNativeDialogs } = require('./native-dialogs');
+const { WindowsChooser } = require('./windows-chooser');
+const os = require('node:os');
+const crypto = require('node:crypto');
+const helpers = fs.readFileSync(path.join(__dirname, 'workflow-helpers.js'), 'utf8');
 
 function resolveSDK(cli) {
   const roots = [__dirname, path.dirname(process.execPath)];
@@ -35,11 +39,26 @@ async function serve() {
   const sessions = [];
   let nativeDialogs;
   let nativeWarning;
+  let windowsChooser;
+  let checkpointFile;
+  let checkpoints = {};
+  let checkpointScope;
   const lines = readline.createInterface({ input: process.stdin });
   for await (const line of lines) {
     let request;
     try {
       request = JSON.parse(line);
+      const scope = request.checkpoint_scope || request.ws;
+      if (checkpointScope && checkpointScope !== scope) throw new Error('Checkpoint scope changed within one worker; keep the same profile scope');
+      checkpointScope = scope;
+      if (!checkpointFile) {
+        const folder = process.env.JEV_USE_WORKFLOW_DIR || path.join(process.env.LOCALAPPDATA || process.env.XDG_STATE_HOME || os.homedir(), '.jev-use', 'workflow-checkpoints');
+        fs.mkdirSync(folder, { recursive: true, mode: 0o700 });
+        checkpointFile = path.join(folder, crypto.createHash('sha256').update(scope).digest('hex') + '.json');
+        if (fs.existsSync(checkpointFile)) checkpoints = JSON.parse(fs.readFileSync(checkpointFile, 'utf8'));
+      }
+      windowsChooser ||= new WindowsChooser(Number(new URL(request.ws).port));
+      windowsChooser.toggle(request.dismiss_overlays !== false);
       if (!browser) {
         if (request.target_id) {
           try { nativeDialogs = await watchNativeDialogs(request.ws, request.target_id, request.dismiss_overlays !== false); }
@@ -73,9 +92,39 @@ async function serve() {
         nativeDialogs = await watchNativeDialogs(request.ws, request.target_id, request.dismiss_overlays !== false);
       }
       if (nativeDialogs) await nativeDialogs.toggle(request.dismiss_overlays !== false);
-      const result = await browser.run(prelude + request.code, { session: selectedSession, timeout: request.timeout });
+      // Reserve on disk BEFORE executing the next script. A hard timeout cannot
+      // turn an uncertain submission into permission to create a duplicate.
+      const permits = [];
+      for (const [key, checkpoint] of Object.entries(checkpoints)) {
+        if (checkpoint.stage === 'submission_reserved') { checkpoint.stage = 'submitting'; permits.push(key); }
+      }
+      const persist = () => {
+        const temporary = checkpointFile + '.tmp';
+        fs.writeFileSync(temporary, JSON.stringify(checkpoints), { mode: 0o600 });
+        fs.renameSync(temporary, checkpointFile);
+      };
+      persist();
+      const restore = `state.jevWorkflow = ${JSON.stringify(checkpoints)}; state.jevSubmissionPermits = ${JSON.stringify(permits)};\n`;
+      const wrapped = prelude + restore + helpers + `
+let value;
+let failure;
+try { value = await (async () => { ${request.code}\n })(); }
+catch (error) { failure = error.message; }
+return { value, failure, checkpoints: JSON.parse(JSON.stringify(state.jevWorkflow || {})) };
+`;
+      const result = await browser.run(wrapped, { session: selectedSession, timeout: request.timeout });
+      if (result.ok) {
+        const execution = result.result;
+        checkpoints = execution.checkpoints;
+        // Atomic journal write before reporting creation success or a later failure.
+        persist();
+        result.result = execution.value;
+        if (Object.keys(checkpoints).length) result.workflowCheckpoints = checkpoints;
+        if (execution.failure) { result.ok = false; result.error = execution.failure; }
+      }
       if (nativeDialogs?.dismissed.length) result.nativeDialogsDismissed = nativeDialogs.dismissed.splice(0);
-      const warning = nativeWarning || nativeDialogs?.warning;
+      if (windowsChooser.dismissed.length) result.nativeDialogsDismissed = [...(result.nativeDialogsDismissed || []), ...windowsChooser.dismissed.splice(0)];
+      const warning = nativeWarning || nativeDialogs?.warning || windowsChooser.warning;
       if (warning) result.warnings = [...(result.warnings || []), warning];
       process.stdout.write(JSON.stringify({ id: request.id, result }) + '\n');
     } catch (error) {
@@ -84,6 +133,7 @@ async function serve() {
   }
   // Do not call context.close(): the external GoLogin browser belongs to the user.
   // Python terminates this owned bridge and its worker on EOF/shutdown.
+  windowsChooser?.toggle(false);
   process.exit(0);
 }
 if (require.main === module) serve().catch(error => { console.error(error.message); process.exit(1); });

@@ -116,9 +116,30 @@ return { url: page.url(), title: await page.title(), stateAvailable: !!state };
 Script deadlines are in seconds (1–900, default 120). `browser_use.settle` is
 also in seconds, limited to 0–10; `5000` is rejected immediately. The MCP server
 answers heartbeat and schema requests while a tool runs and refuses overlapping
-actions instead of silently queueing duplicate submissions. Attachment errors
-must be diagnosed from the returned error; they do not prove CDP supports only
-one websocket.
+actions instead of silently queueing duplicate submissions. Attachment errors must be diagnosed from the returned error; they do not prove CDP supports only one websocket.
+
+Prepared scripts expose a checkpointed `workflow` helper for repeated account
+jobs. It supports `workflow.begin`, condition-based login detection,
+`workflow.browseFeed({seconds:30})`, `workflow.beforeCreate`, `workflow.submitCreation`, exact creation
+confirmation, and `workflow.loggedOut`. Checkpoints are written atomically so a
+timeout or logout failure stops a duplicate submission. The 30-second browsing
+period is used for repeated Facebook Page-creation jobs, and is never added to
+ordinary browser tasks. The helper reports whether video playback was observed;
+scrolling alone is not reported as successful playback.
+
+Call `workflow.beforeCreate(pageName)` in its own script call. The next call
+uses `workflow.submitCreation({selector})` and confirms the exact success notice.
+The reservation is saved before that next script executes, so a hard timeout
+leaves an uncertain submission blocked rather than retrying it automatically.
+Use the same run ID/account on retries. Checkpoints are scoped to the GoLogin
+profile automatically when this MCP server opened it; for an externally opened
+profile, use the same `checkpoint_scope` on each call.
+
+On Windows, a browser-owned `Sign in as` chooser may be outside the page DOM.
+The script worker starts a scoped PowerShell UI Automation helper that invokes
+`Close` only when it finds that heading inside the same browser process. It does
+not send global keystrokes or click unrelated windows; warnings are returned if
+the helper cannot access the dialog.
 
 Reads default to 6,000 characters per page; `max_chars` can raise this to 20,000.
 The harness receives 13 tool schemas, loaded skill instructions, and tool results;

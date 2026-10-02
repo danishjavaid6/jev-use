@@ -514,7 +514,9 @@ TOOLS: list[dict[str, Any]] = [
                     "type": "string",
                     "description": (
                         "Playwright JavaScript executed by BetterWright. Use page, "
-                        "snapshot, human, and screenshot; return a short JSON-safe result."
+                        "snapshot, human, and screenshot; return a short JSON-safe result. "
+                        "Repeated account workflows also have a checkpointed workflow helper: "
+                        "begin, browseFeed, beforeCreate, confirmCreated, and loggedOut."
                     ),
                 },
                 "port": {
@@ -535,6 +537,10 @@ TOOLS: list[dict[str, Any]] = [
                 "page_url": {
                     "type": "string",
                     "description": "Exact existing tab URL to select when multiple tabs are open. Omit on subsequent script calls to keep the selected tab.",
+                },
+                "checkpoint_scope": {
+                    "type": "string",
+                    "description": "Stable non-secret profile identity for workflow checkpoints across browser restarts. Automatically uses the GoLogin ID when this server opened it.",
                 },
                 "dismiss_overlays": {
                     "type": "boolean",
@@ -1083,6 +1089,12 @@ def tool_browser_script(args: dict[str, Any]) -> str:
         options["dismiss_overlays"] = False
     if page_url:
         options["page_url"] = page_url
+    owner = _GOLOGIN.get("session")
+    scope = args.get("checkpoint_scope")
+    if not scope and owner is not None and owner.port == port:
+        scope = "gologin:" + owner.profile.id
+    if scope:
+        options["checkpoint_scope"] = str(scope)
     result = betterwright.run_script(port, code, **options)
     if not result.get("ok"):
         raise betterwright.BetterWrightError(json.dumps(result, ensure_ascii=False))
