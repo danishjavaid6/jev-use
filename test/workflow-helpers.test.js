@@ -159,3 +159,29 @@ test('login detects an aria-labeled profile even without a button role', async (
   assert.equal(await f.workflow.loginSavedAccount({accountName:'Account',password:'unused'}),'signed_in');
   assert.equal(selected,true);
 });
+
+test('feed fallback follows one observed Reels link and records actual playback', async () => {
+  const f=fixture(); let opened=false; const navigations=[];
+  const video={paused:false,readyState:4};
+  f.page.url=()=> 'https://www.facebook.com/';
+  f.page.getByRole=()=>({first() {return this;},count:async()=>1,getAttribute:async()=>'/reel/observed-id/'});
+  f.page.locator=()=>({count:async()=>opened?1:0,nth:()=>({evaluate:async callback=>callback(video)})});
+  f.workflow.navigate=async url=>{navigations.push(url);opened=true;};
+  // URL is a standard sandbox primitive in BetterWright.
+  const originalURL=global.URL;
+  // The helper's VM uses a separate realm; inject its URL through a new fixture below.
+  const sandbox={state:f.state,page:f.page,dialogs:f.dialogs,Date:f.Date,URL:originalURL};
+  vm.runInNewContext(source+'\nglobalThis.workflow=workflow;',sandbox);
+  sandbox.workflow.navigate=f.workflow.navigate;
+  sandbox.workflow.begin('reels-fallback','account');
+  const browsing=await sandbox.workflow.browseFeed({discoverVideoSurface:true});
+  assert.equal(browsing.playingObserved,true);
+  assert.deepEqual(navigations,['https://www.facebook.com/reel/observed-id/']);
+});
+
+test('navigation waits for commit instead of the slow SPA load event', async () => {
+  const f=fixture(); let accepted=false;
+  f.dialogs.acceptNext=async()=>{accepted=true;};
+  f.page.goto=async (url,options)=>{assert.equal(accepted,true);assert.equal(options.waitUntil,'commit');assert.equal(options.timeout,45000);return url;};
+  assert.equal(await f.workflow.navigate('https://www.facebook.com/'),'https://www.facebook.com/');
+});

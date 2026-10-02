@@ -30,7 +30,7 @@ Use the same config and checkpoint scope in both calls. `account` is a stable
 account identifier or the observed saved-account name; `account_name` is needed
 only when those differ. The runner checks the active identity on resumption.
 
-First call: `browser_script(port=N, timeout=150, code=...)`:
+First call: `browser_script(port=N, timeout=240, code=...)`:
 
 ```js
 return await facebookPages.prepare({
@@ -46,8 +46,11 @@ Replace uppercase variables with task values in the invocation, without storing
 the password in an external file. Keep default `dismiss_overlays=true`; the
 Sign in as credential chooser is distinct from the Facebook password form.
 
-Preparation selects the saved account, handles either password or remembered
-login, scrolls/plays the feed for 30 seconds, fills the Page form, verifies it is
+Preparation verifies an already-signed-in account using its identity and matching
+self-profile link, or selects the saved card once and waits up to 60 seconds for
+password/remembered login to finish. It scrolls/plays the feed for 30 seconds
+(tries an observed Reels/Videos link once if the home feed has no playback),
+fills the Page form, verifies it is
 ready, and saves `submission_reserved` without creating the Page. If the user
 changes the browsing requirement, adapt that step deliberately rather than
 claiming it occurred. No observed playback means pause for one focused inspection.
@@ -57,7 +60,7 @@ If `submission_reserved`, second call:
 ```text
 browser_script:
   port: N
-  timeout: 120
+  timeout: 180
   submission: {run_id: RUN_ID, account: ACCOUNT}
   code: return await facebookPages.finish({run_id: RUN_ID, account: ACCOUNT, page_name: PAGE_NAME});
 ```
@@ -81,8 +84,13 @@ Continue to the next account only after `logged_out`.
 - Other stages: correct the observed problem and retry preparation with the SAME
   run ID/account. Never erase checkpoints or generate new IDs to bypass a lock.
 
+Never manually seed `accountId` to skip login. If the self-profile link cannot
+verify the requested account, inspect once; an `account_id` supplied by the user
+or verified in that inspection may be passed in config. The cookie must match it.
+A login already selected/submitted resumes waiting without repeating the action.
+
 Selector overrides in the runner are only for demonstrated UI changes:
-`account_selector`, `signed_in_selector`, `name_selector`, `category_selector`,
+`account_selector`, `name_selector`, `category_selector`,
 `option_selector`, `bio_selector`, `create_selector`; finish accepts `confirmation`
 and `logout` options from the workflow helpers. Pass `create_selector` in the
 submission argument as `selector` too. Do not guess selectors or URLs.
@@ -100,4 +108,5 @@ perform a logout URL experiment. Batch known steps rather than narrate each clic
 
 Call `browser_close` to save the GoLogin profile. Report each account's Page name,
 confirmed stage, captured Page URL/ID when available, and unfinished work. Include
-elapsed time; do not call pending creation or pending logout complete.
+elapsed time and the returned `timings` (login, browsing, navigation, fill,
+confirmation, logout); do not call pending creation or pending logout complete.

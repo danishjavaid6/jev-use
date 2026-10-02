@@ -13,6 +13,12 @@ const workflow = {
     if (!checkpoint) throw new Error('Call workflow.begin first');
     return checkpoint;
   },
+  async navigate(url, { timeout = 45000 } = {}) {
+    // Commit waits for the destination response, not Facebook's slow SPA hydration.
+    // The next step waits for its actual control/identity before acting.
+    await dialogs.acceptNext();
+    return page.goto(url, { waitUntil: 'commit', timeout });
+  },
   async waitForLogin({ password, signedIn, timeout = 20000 }) {
     // The caller supplies observed selectors. A saved session may skip the password.
     const winner = await Promise.any([
@@ -65,14 +71,16 @@ const workflow = {
     await this.creationControl().click({ trial: true, timeout });
     return { formReady: true };
   },
-  async browseFeed({ seconds = 30 } = {}) {
+  async browseFeed({ seconds = 30, discoverVideoSurface = false } = {}) {
     if (!Number.isFinite(seconds) || seconds < 0 || seconds > 60) throw new Error('Feed duration must be 0–60 seconds');
     const checkpoint = this.status();
     if (checkpoint.browsed || checkpoint.stage === 'created' || checkpoint.stage === 'logged_out') return checkpoint.browsing;
     const started = Date.now();
-    const deadline = started + seconds * 1000;
+    let deadline = started + seconds * 1000;
+    let navigationMs = 0;
     let scrolls = 0;
     let playingObserved = false;
+    let videoSurfaceTried = false;
     while (Date.now() < deadline) {
       // Observe visible feed videos only. Muted playback avoids unexpected audio.
       const videos = page.locator('video:visible');
@@ -89,13 +97,35 @@ const workflow = {
           playingObserved ||= playing;
         } catch { /* A scrolled-away video can disappear; inspect on the next pass. */ }
       }
+      // Let playback start before scrolling the video out of view.
+      await page.waitForTimeout(Math.min(3000, Math.max(0, deadline - Date.now())));
+      for (let index = 0; index < count; index++) {
+        try { playingObserved ||= await videos.nth(index).evaluate(video => !video.paused && video.readyState >= 2); }
+        catch { /* Feed rerendered; retry on the next sample. */ }
+      }
+      if (discoverVideoSurface && !playingObserved && !videoSurfaceTried && Date.now() - started >= 6000) {
+        videoSurfaceTried = true;
+        const link = page.getByRole('link', { name: /^(Reels|Videos)$/i }).first();
+        if (await link.count()) {
+          const href = await link.getAttribute('href');
+          if (href) {
+            const target = new URL(href, page.url());
+            if (target.protocol === 'https:' && /(^|\.)facebook\.com$/.test(target.hostname)) {
+              const navigationStarted = Date.now();
+              await this.navigate(target.href);
+              const elapsed = Date.now() - navigationStarted;
+              navigationMs += elapsed;
+              deadline += elapsed; // Loading a different surface is not browsing time.
+            }
+          }
+        }
+      }
       await page.mouse.wheel(0, 550);
       scrolls++;
-      // Deliberate user-requested browsing time, not a form/navigation settle wait.
-      await page.waitForTimeout(Math.min(3000, Math.max(0, deadline - Date.now())));
+      // The three-second playback observation above supplies the requested browsing time.
     }
-    checkpoint.browsed = Date.now() - started >= 30000 && playingObserved;
-    checkpoint.browsing = { elapsedMs: Date.now() - started, scrolls, playingObserved };
+    checkpoint.browsed = Date.now() - started - navigationMs >= 30000 && playingObserved;
+    checkpoint.browsing = { elapsedMs: Date.now() - started, navigationMs, scrolls, playingObserved };
     checkpoint.stage = checkpoint.browsed ? 'browsed' : 'browse_incomplete';
     return checkpoint.browsing;
   },
@@ -146,11 +176,10 @@ const workflow = {
     checkpoint.stage = 'created';
     return checkpoint;
   },
-  async logout({ chooserSelector = 'text=Use another profile', profileSelector, logoutSelector, timeout = 20000 } = {}) {
+  async logout({ chooserSelector = 'text=Use another profile', profileSelector, logoutSelector, timeout = 45000 } = {}) {
     if (this.status().stage !== 'created') throw new Error('Confirm creation before logout');
     // Optional wizard: accept leaving once; never invent tokenless logout URLs.
-    await dialogs.acceptNext();
-    await page.goto('https://www.facebook.com/', { waitUntil: 'domcontentloaded', timeout });
+    await this.navigate('https://www.facebook.com/', { timeout });
     const chooser = page.locator(chooserSelector);
     if (!await chooser.isVisible()) {
       const profile = await this.profileControl(profileSelector, timeout);

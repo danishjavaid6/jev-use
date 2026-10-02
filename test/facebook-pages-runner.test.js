@@ -10,12 +10,27 @@ function fixture() {
   const events = [];
   const record = {stage:'started'};
   let identity = null;
+  let now = 0;
+  let matched = true;
+  let loginDelay = 0;
+  let clickedAt = null;
   const sandbox = {
-    context: { cookies: async () => identity ? [{name:'c_user',value:identity},{name:'xs',value:'never-return-this'}] : [] },
-    page: { evaluate: async () => identity, goto: async url => events.push(['goto',url]), getByText: () => ({waitFor:async () => events.push(['chooser'])}) },
+    Date: {now: () => now},
+    page: {
+      url: () => 'https://www.facebook.com/',
+      evaluate: async (callback, name) => {
+        if (clickedAt !== null && now - clickedAt >= loginDelay) identity='account-123';
+        return name ? (identity ? {id:identity,matched} : null) : identity;
+      },
+      waitForTimeout:async ms => {now+=ms;},
+      locator: () => ({first() {return this;},isVisible:async () => false}),
+      getByRole: () => ({filter() {return this;},isVisible:async () => !identity,
+        click:async () => {clickedAt=now;events.push(['login']);}}),
+      getByText: () => ({waitFor:async () => events.push(['chooser'])})
+    },
     workflow: {
       begin: () => record,
-      loginSavedAccount: async options => { assert.equal(options.password, 'fixture-only'); identity='account-123'; events.push(['login']); },
+      navigate: async url => events.push(['goto',url]),
       browseFeed: async options => { assert.equal(options.seconds,30); record.browsed=true; events.push(['browse']); },
       fillPage: async () => events.push(['fill']),
       beforeCreate: name => { record.pageName=name; record.stage='submission_reserved'; events.push(['reserve']); return record; },
@@ -26,14 +41,14 @@ function fixture() {
     }
   };
   vm.runInNewContext(source + '\nglobalThis.runner = facebookPages;', sandbox);
-  return {...sandbox, events, record, setIdentity: value => {identity=value;}};
+  return {...sandbox, events, record, setIdentity: value => {identity=value;}, setMatched: value => {matched=value;}, setDelay: value => {loginDelay=value;}};
 }
 
 test('prepares then confirms and logs out without retaining the password', async () => {
   const f = fixture();
   assert.equal((await f.runner.prepare(config)).stage, 'submission_reserved');
   assert.equal(f.record.accountId,'account-123');
-  assert.deepEqual(f.events.map(event=>event[0]), ['goto','login','browse','goto','fill','reserve']);
+  assert.deepEqual(f.events.map(event=>event[0]), ['login','browse','goto','fill','reserve']);
   assert.ok(!JSON.stringify(f.record).includes(config.password));
   assert.ok(!JSON.stringify(f.record).includes('never-return-this'));
   f.record.stage='submitting'; // Bridge journals and performs the one creation click.
@@ -67,4 +82,54 @@ test('stops when no feed video playback was observed', async () => {
   f.workflow.browseFeed = async () => {f.record.browsed=false;};
   await assert.rejects(f.runner.prepare(config), /without observed video/);
   assert.ok(!f.events.some(event=>event[0]==='fill' || event[0]==='reserve'));
+});
+
+
+test('verified already-signed-in account skips chooser and manual checkpoint migration', async () => {
+  const f=fixture(); f.setIdentity('account-123');
+  await f.runner.prepare(config);
+  assert.equal(f.record.accountId,'account-123');
+  assert.ok(!f.events.some(event=>event[0]==='login'));
+});
+
+test('slow remembered login waits for identity without repeated clicks or reloads', async () => {
+  const f=fixture(); f.setDelay(35000);
+  await f.runner.prepare(config);
+  assert.equal(f.events.filter(event=>event[0]==='login').length,1);
+  assert.equal(f.record.accountId,'account-123');
+});
+
+test('wrong or unverified existing identity never reaches browsing or creation', async () => {
+  const f=fixture(); f.setIdentity('other-account'); f.setMatched(false);
+  await assert.rejects(f.runner.prepare(config), /identity did not become verifiable/);
+  assert.equal(f.record.accountId,undefined);
+  assert.equal(f.events.length,0);
+});
+
+test('a pending login is resumed without selecting the saved card again', async () => {
+  const f=fixture(); f.record.loginCardClicked=true;
+  await assert.rejects(f.runner.prepare(config), /identity did not become verifiable/);
+  assert.ok(!f.events.some(event=>event[0]==='login'));
+});
+
+test('identity verification requires the requested name on a link to the cookie identity', async () => {
+  let now=0;
+  const checkpoint={};
+  const sandbox={
+    Date:{now:()=>now},URL,
+    location:{hostname:'www.facebook.com',href:'https://www.facebook.com/'},
+    document:{cookie:'c_user=123; unrelated=fixture',querySelectorAll:()=>[
+      {href:'https://www.facebook.com/profile.php?id=999',innerText:'Saved account'},
+      {href:'https://www.facebook.com/profile.php?id=123',innerText:'Another account'}
+    ]},
+    page:{evaluate:async(callback,arg)=>callback(arg),waitForTimeout:async ms=>{now+=ms;},
+      locator:()=>({first(){return this;},isVisible:async()=>false}),
+      getByRole:()=>({filter(){return this;},isVisible:async()=>false})}
+  };
+  vm.runInNewContext(source+'\nglobalThis.runner=facebookPages;',sandbox);
+  await assert.rejects(sandbox.runner.login(config,checkpoint,1000),/did not become verifiable/);
+  assert.equal(checkpoint.accountId,undefined);
+  sandbox.document.querySelectorAll=()=>[{href:'https://www.facebook.com/profile.php?id=123',innerText:' Saved   account '}];
+  assert.equal(await sandbox.runner.login(config,checkpoint,1000),'signed_in');
+  assert.equal(checkpoint.accountId,'123');
 });

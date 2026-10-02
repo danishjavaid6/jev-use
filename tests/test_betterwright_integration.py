@@ -44,11 +44,11 @@ def test_persistent_sdk_login_alert_and_hard_timeout(monkeypatch):
                 except betterwright.BetterWrightError:
                     time.sleep(.05)
             url = f'http://127.0.0.1:{server.server_port}/'
-            result = betterwright.run_script(port, f"await page.goto({json.dumps(url)}); state.marker=42; return page.url()", timeout=30)
+            result = betterwright.run_script(port, f"await workflow.navigate({json.dumps(url)}); state.marker=42; return page.url()", timeout=30)
             assert result['ok'], result
             runner = betterwright.run_script(port, 'return {version:facebookPages.version, identity:await facebookPages.activeAccountId()}', timeout=30)
             assert runner['ok'], str(runner.get('error'))
-            assert runner['result'] == {'version':'1', 'identity':None}
+            assert runner['result'] == {'version':'2', 'identity':None}
             pid = betterwright._BRIDGES[port][1].process.pid
             result = betterwright.run_script(port, "await page.getByRole('button',{name:'Test account',exact:true}).click(); await page.locator('#pass').fill('fixture-only'); await dialogs.acceptNext(); await page.getByRole('button',{name:'Log in',exact:true}).click(); await page.locator('#done').getByText('Logged in',{exact:true}).waitFor(); return state.marker", timeout=30)
             assert result['ok'], result
