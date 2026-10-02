@@ -21,9 +21,13 @@ jobs:
           python-version: '3.12'
       - run: python -m venv .venv
       - if: runner.os == 'Windows'
-        run: .venv\Scripts\python.exe -m pip install -e .
+        run: .venv\Scripts\python.exe -m pip install -e ".[dev]"
       - if: runner.os != 'Windows'
-        run: .venv/bin/python -m pip install -e .
+        run: .venv/bin/python -m pip install -e ".[dev]"
+      - if: runner.os == 'Windows'
+        run: .venv\Scripts\python.exe -m pytest tests/test_mobile_mcp.py -q
+      - if: runner.os != 'Windows'
+        run: .venv/bin/python -m pytest tests/test_mobile_mcp.py -q
       - run: node --test test/mcp-probe.test.js test/native-dialogs.test.js test/workflow-helpers.test.js test/facebook-pages-runner.test.js
       - if: runner.os == 'Windows'
         shell: pwsh

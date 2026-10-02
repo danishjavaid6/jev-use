@@ -657,7 +657,7 @@ TOOLS: list[dict[str, Any]] = [
                     "default": False,
                     "description": "Actually tap. Default false: decide and validate only.",
                 },
-                "max_steps": {"type": "integer", "default": DEFAULT_MAX_STEPS},
+                "max_steps": {"type": "integer", "default": DEFAULT_MAX_STEPS, "minimum": 1, "maximum": 20},
                 "min_confidence": {
                     "type": "number",
                     "default": DEFAULT_MIN_CONFIDENCE,
@@ -666,6 +666,8 @@ TOOLS: list[dict[str, Any]] = [
                 "settle": {
                     "type": "number",
                     "default": ANDROID_DEFAULT_SETTLE,
+                    "minimum": 0,
+                    "maximum": 10,
                     "description": "Upper bound in seconds to wait for the screen to move.",
                 },
                 "use_cache": {
@@ -1144,6 +1146,8 @@ def tool_android_devices(args: dict[str, Any]) -> str:
 
 
 def tool_android_use(args: dict[str, Any]) -> str:
+    max_steps = int(_bounded_number(args, "max_steps", DEFAULT_MAX_STEPS, 1, 20))
+    settle = _bounded_number(args, "settle", ANDROID_DEFAULT_SETTLE, 0, 10)
     goal = args["goal"]
     act = bool(args.get("act", False))
     try:
@@ -1155,7 +1159,7 @@ def tool_android_use(args: dict[str, Any]) -> str:
             act=act,
             max_steps=max_steps,
             min_confidence=float(args.get("min_confidence", DEFAULT_MIN_CONFIDENCE)),
-            settle=float(args.get("settle", ANDROID_DEFAULT_SETTLE)),
+            settle=settle,
             writer=TextModel(),
             decompose=bool(args.get("decompose", True)),
             cache=PlanCache(CACHE_PATH) if args.get("use_cache", True) else None,
@@ -1329,6 +1333,7 @@ def main() -> int:
     log(f"{SERVER_NAME} {SERVER_VERSION} ready (browser only)")
 
     busy = threading.Event()
+    active_request = {}
     write_lock = threading.Lock()
 
     def respond(request):
@@ -1352,8 +1357,9 @@ def main() -> int:
             if busy.is_set():
                 with write_lock:
                     send({"jsonrpc": "2.0", "id": request.get("id"), "result": {
-                        "isError": True, "content": [{"type": "text", "text": "A tool is still running. Do not repeat actions; wait for its result."}]}})
+                        "isError": True, "content": [{"type": "text", "text": f"Request not started: {active_request.get('tool', 'another tool')} (request ID {active_request.get('id')}) is still running. Wait for that original call's result; do not issue parallel phone calls or repeat actions."}]}})
             else:
+                active_request.update(tool=request.get("params", {}).get("name", "unknown tool"), id=request.get("id"))
                 busy.set()
                 threading.Thread(target=respond, args=(request,), daemon=True).start()
         else:
