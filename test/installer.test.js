@@ -190,9 +190,15 @@ test('skills install into the shared global agent directory on a fresh machine',
   const results = skills.install({ force: true });
   const shared = path.join(dir, '.agents', 'skills');
   assert.ok(results.some((result) => result.file.startsWith(shared) && result.ok));
-  for (const name of ['browser-use', 'mobile-use']) {
+  for (const name of skills.SKILLS) {
     assert.ok(fs.existsSync(path.join(shared, name, 'SKILL.md')));
   }
+  assert.ok(fs.existsSync(path.join(shared, 'facebook-create-pages', 'scripts', 'account-runner.js')));
+  assert.ok(fs.existsSync(path.join(shared, 'facebook-create-pages', 'agents', 'openai.yaml')));
+  const runner = path.join(shared, 'facebook-create-pages', 'scripts', 'account-runner.js');
+  fs.writeFileSync(runner, 'stale runner');
+  skills.install();
+  assert.notEqual(fs.readFileSync(runner, 'utf8'), 'stale runner', 'resources update even when SKILL.md is unchanged');
 });
 
 // -- targeting a harness ----------------------------------------------------

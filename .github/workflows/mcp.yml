@@ -24,7 +24,7 @@ jobs:
         run: .venv\Scripts\python.exe -m pip install -e .
       - if: runner.os != 'Windows'
         run: .venv/bin/python -m pip install -e .
-      - run: node --test test/mcp-probe.test.js test/native-dialogs.test.js test/workflow-helpers.test.js
+      - run: node --test test/mcp-probe.test.js test/native-dialogs.test.js test/workflow-helpers.test.js test/facebook-pages-runner.test.js
       - if: runner.os == 'Windows'
         shell: pwsh
         run: |

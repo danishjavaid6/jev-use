@@ -12,7 +12,7 @@ function fixture(videoPresent = true) {
   const sandbox = { state: {}, dialogs: { acceptNext: async () => {} }, Date: { now: () => now }, page: {
     mouse: { wheel: async () => {} },
     waitForTimeout: async ms => { now += ms; },
-    locator: () => ({ first() { return this; }, count: async () => videoPresent ? 1 : 0,
+    locator: () => ({ first() { return this; }, nth() { return this; }, count: async () => videoPresent ? 1 : 0,
       evaluate: async callback => callback(video), click: async options => { if (!options?.trial) clicks++; },
       filter() { return this; }, waitFor: async () => {} })
   } };
@@ -114,9 +114,48 @@ test('form filling selects the exact category and only trial-clicks Create Page'
   const f = fixture();
   let categorySelected = false;
   let trialChecked = false;
-  f.page.getByRole = (role, options) => ({ fill: async () => {}, click: async options => { assert.equal(options.trial, true); trialChecked = true; } });
+  f.page.getByRole = (role, options) => ({ waitFor: async () => {}, fill: async () => {}, click: async options => { assert.equal(options.trial, true); trialChecked = true; } });
+  f.page.getByLabel = (...args) => f.page.getByRole('textbox', { name: args[0] });
   f.page.getByText = category => ({ last() { return this; }, waitFor: async () => {}, click: async () => { assert.equal(category, 'Reel creator'); categorySelected = true; } });
   await f.workflow.fillPage({ pageName:'Fixture Page', bio:'Fixture bio' });
   assert.equal(categorySelected, true);
   assert.equal(trialChecked, true);
+});
+
+test('form labels work when role selectors cannot see the fields', async () => {
+  const f = fixture();
+  const filled = [];
+  f.page.getByRole = (role) => role === 'button'
+    ? {click: async options => assert.equal(options.trial, true)}
+    : {waitFor: async () => {throw new Error('missing role');}};
+  f.page.getByLabel = label => ({waitFor: async () => {}, fill: async value => filled.push(value)});
+  f.page.getByText = () => ({last() {return this;},waitFor: async () => {},click: async () => {}});
+  await f.workflow.fillPage({pageName:'Label Page',bio:'Description'});
+  assert.deepEqual(filled, ['Label Page','Reel creator','Description']);
+});
+
+test('checks later visible videos without blocking on a buffering play promise', async () => {
+  const f = fixture();
+  const videos = [
+    {paused:true,readyState:0,play: () => new Promise(() => {})},
+    {paused:false,readyState:4,play: async () => {}}
+  ];
+  f.page.locator = () => ({count:async () => videos.length,nth:index => ({evaluate:async callback => callback(videos[index])})});
+  f.workflow.begin('multiple-videos','account');
+  const browsing = await f.workflow.browseFeed();
+  assert.equal(browsing.elapsedMs,30000);
+  assert.equal(browsing.playingObserved,true);
+});
+
+test('login detects an aria-labeled profile even without a button role', async () => {
+  const f = fixture();
+  let selected = false;
+  f.page.getByRole = (role, options) => options?.name
+    ? {waitFor: async () => {throw new Error('no role');}}
+    : {filter() {return this;},waitFor:async () => {},click:async () => {selected=true;}};
+  f.page.locator = selector => ({filter() {return this;},first() {return this;},
+    waitFor:async () => {if (selector.includes('pass')) throw new Error('no password');},
+    click:async () => {selected=true;}});
+  assert.equal(await f.workflow.loginSavedAccount({accountName:'Account',password:'unused'}),'signed_in');
+  assert.equal(selected,true);
 });

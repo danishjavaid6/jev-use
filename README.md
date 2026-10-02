@@ -85,6 +85,14 @@ plans bypass Jev. Use `decompose=false` for one-step goals. Compound planning
 and generated text require a configured `JEV_USE_TEXT_MODEL`; an unavailable
 planner is skipped. Literal text supplied to `browser_action` needs no writer.
 
+For repeated Facebook Page creation, use `/facebook-create-pages` (or
+`$facebook-create-pages` in Codex). Installation copies its instructions, runner,
+and metadata into the shared and supported harness skill directories. The runner
+is also injected into `browser_script` as `facebookPages`, so the agent calls
+`facebookPages.prepare` and `facebookPages.finish` instead of rewriting the flow.
+It uses the existing GoLogin browser, the requested 30-second feed browsing step,
+and the submission checkpoint protocol. It never stores the task password.
+
 For a known workflow, `browser_script` runs prepared Playwright through the
 BetterWright SDK, avoiding a model request per click. It uses Node.js 22+ and the
 installed BetterWright package; Bun is no longer required at execution time.

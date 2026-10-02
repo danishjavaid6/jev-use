@@ -16,6 +16,10 @@ explain that it needs closing and reopening; do not silently reuse it if the
 user wants a visible browser. Never kill an unrelated browser to do this.
 Do not operate the same page the user is actively editing.
 
+For repeated Facebook Page creation, load `facebook-create-pages` and use its
+bundled `facebookPages` runner. That skill contains the focused account workflow
+and recovery rules; do not recreate the script from scratch.
+
 1. Call `browser_profiles` once. Reuse the matching live CDP port.
 2. If closed, call `browser_open(profile="name", headless=false)` once and use its returned port.
    Use `vendor="gologin"` for GoLogin; never copy it into Chrome.

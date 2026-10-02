@@ -1,0 +1,4 @@
+interface:
+  display_name: "Facebook Page Creation"
+  short_description: "Run checkpointed Page creation in GoLogin"
+  default_prompt: "Use $facebook-create-pages to create Pages for the requested saved accounts in my GoLogin profile."

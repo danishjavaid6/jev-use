@@ -21,27 +21,41 @@ const workflow = {
     ]).catch(() => { throw new Error('Neither password prompt nor signed-in marker appeared; inspect once instead of repeating clicks'); });
     return winner;
   },
+  async visibleControl(candidates, timeout) {
+    return Promise.any(candidates.map(async candidate => {
+      await candidate.waitFor({ state: 'visible', timeout });
+      return candidate;
+    })).catch(() => { throw new Error('No known control became visible; inspect once for an observed selector override'); });
+  },
+  profileControl(selector, timeout) {
+    return this.visibleControl(selector ? [page.locator(selector)] : [
+      page.getByRole('button', { name: 'Your profile', exact: true }),
+      page.locator('[aria-label="Your profile"]')
+    ], timeout);
+  },
   async loginSavedAccount({ accountName, password, accountSelector, signedInSelector, timeout = 20000 }) {
-    const card = accountSelector ? page.locator(accountSelector) : page.getByRole('button').filter({ hasText: accountName });
-    await card.waitFor({ state: 'visible', timeout });
+    const card = await this.visibleControl(accountSelector ? [page.locator(accountSelector)] : [
+      page.getByRole('button').filter({ hasText: accountName }),
+      page.locator('div[role="button"]').filter({ hasText: accountName })
+    ], timeout);
     await card.click();
     const input = page.locator('input[name="pass"]').first();
-    const signedIn = signedInSelector ? page.locator(signedInSelector) : page.getByRole('button', { name: 'Your profile', exact: true });
+    const signedIn = this.profileControl(signedInSelector, timeout);
     const winner = await Promise.any([
       input.waitFor({ state: 'visible', timeout }).then(() => 'password'),
-      signedIn.waitFor({ state: 'visible', timeout }).then(() => 'signed_in')
+      signedIn.then(() => 'signed_in')
     ]).catch(() => { throw new Error('Login did not reach a password prompt or signed-in marker; inspect once'); });
     if (winner === 'password') {
       await input.fill(password);
       await input.press('Enter');
-      await signedIn.waitFor({ state: 'visible', timeout });
+      await signedIn;
     }
     return winner;
   },
   async fillPage({ pageName, bio, category = 'Reel creator', nameSelector, categorySelector, optionSelector, bioSelector, timeout = 10000 }) {
-    const name = nameSelector ? page.locator(nameSelector) : page.getByRole('textbox', { name: /^Page name/i });
-    const categories = categorySelector ? page.locator(categorySelector) : page.getByRole('combobox', { name: /^Category/i });
-    const description = bioSelector ? page.locator(bioSelector) : page.getByRole('textbox', { name: /^Bio/i });
+    const name = await this.visibleControl(nameSelector ? [page.locator(nameSelector)] : [page.getByRole('textbox', { name: /^Page name/i }), page.getByLabel(/^Page name/i)], timeout);
+    const categories = await this.visibleControl(categorySelector ? [page.locator(categorySelector)] : [page.getByRole('combobox', { name: /^Category/i }), page.getByLabel(/^Category/i)], timeout);
+    const description = await this.visibleControl(bioSelector ? [page.locator(bioSelector)] : [page.getByRole('textbox', { name: /^Bio/i }), page.getByLabel(/^Bio/i)], timeout);
     await name.fill(pageName);
     await categories.fill(category);
     const option = optionSelector ? page.locator(optionSelector) : page.getByText(category, { exact: true }).last();
@@ -61,15 +75,19 @@ const workflow = {
     let playingObserved = false;
     while (Date.now() < deadline) {
       // Observe visible feed videos only. Muted playback avoids unexpected audio.
-      const visible = page.locator('video:visible').first();
-      if (await visible.count()) {
+      const videos = page.locator('video:visible');
+      const count = await videos.count();
+      for (let index = 0; index < count; index++) {
         try {
-          await visible.evaluate(async video => {
+          const playing = await videos.nth(index).evaluate(video => {
             video.muted = true;
-            await video.play();
+            const playing = !video.paused && video.readyState >= 2;
+            // play() can remain pending during buffering; never await it here.
+            if (video.paused) video.play().catch(() => {});
+            return playing;
           });
-          playingObserved ||= await visible.evaluate(video => !video.paused && video.readyState >= 2);
-        } catch { /* Autoplay/site restrictions: report, never invent playback. */ }
+          playingObserved ||= playing;
+        } catch { /* A scrolled-away video can disappear; inspect on the next pass. */ }
       }
       await page.mouse.wheel(0, 550);
       scrolls++;
@@ -135,8 +153,7 @@ const workflow = {
     await page.goto('https://www.facebook.com/', { waitUntil: 'domcontentloaded', timeout });
     const chooser = page.locator(chooserSelector);
     if (!await chooser.isVisible()) {
-      const profile = profileSelector ? page.locator(profileSelector) : page.getByRole('button', { name: 'Your profile', exact: true });
-      await profile.waitFor({ state: 'visible', timeout });
+      const profile = await this.profileControl(profileSelector, timeout);
       await profile.click();
       const logout = logoutSelector ? page.locator(logoutSelector) : page.getByText(/^Log out$/i).last();
       await logout.waitFor({ state: 'visible', timeout });

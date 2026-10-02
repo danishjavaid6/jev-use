@@ -9,7 +9,7 @@ const { watchNativeDialogs } = require('./native-dialogs');
 const { WindowsChooser } = require('./windows-chooser');
 const os = require('node:os');
 const crypto = require('node:crypto');
-const helpers = fs.readFileSync(path.join(__dirname, 'workflow-helpers.js'), 'utf8');
+const helpers = fs.readFileSync(path.join(__dirname, 'workflow-helpers.js'), 'utf8') + '\n' + fs.readFileSync(path.join(__dirname, '..', 'skills', 'facebook-create-pages', 'scripts', 'account-runner.js'), 'utf8');
 
 function resolveSDK(cli) {
   const roots = [__dirname, path.dirname(process.execPath)];
