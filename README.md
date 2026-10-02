@@ -127,13 +127,25 @@ period is used for repeated Facebook Page-creation jobs, and is never added to
 ordinary browser tasks. The helper reports whether video playback was observed;
 scrolling alone is not reported as successful playback.
 
-Call `workflow.beforeCreate(pageName)` in its own script call. The next call
-uses `workflow.submitCreation({selector})` and confirms the exact success notice.
-The reservation is saved before that next script executes, so a hard timeout
-leaves an uncertain submission blocked rather than retrying it automatically.
-Use the same run ID/account on retries. Checkpoints are scoped to the GoLogin
-profile automatically when this MCP server opened it; for an externally opened
-profile, use the same `checkpoint_scope` on each call.
+Use `workflow.loginSavedAccount` for the saved-account chooser (password or
+remembered session) and `workflow.fillPage` for the observed form. Call
+`workflow.beforeCreate(pageName)` after the form is actionable, then submit via
+`browser_script`'s `submission:{run_id,account}` argument. Reads preserve the
+reservation. An invalid selector fails before any click or consumption of the
+reservation. The tool checks actionability using a trial click, saves the attempt
+on disk, then clicks the button role once. The snippet runs after the click:
+
+```js
+await workflow.confirmCreated();
+return await workflow.logout();
+```
+
+Confirmation waits for a delayed creation notice containing the exact Page name.
+Logout accepts the wizard's beforeunload and uses the account menu, never clears
+cookies or invents logout tokens. After a submission, only re-check confirmation
+or logout; a disabled button or unchanged URL does not authorize another click.
+Use stable run/account IDs on retries and checkpoint_scope for externally opened
+profiles. The helper selectors can be overridden using observed DOM evidence.
 
 On Windows, a browser-owned `Sign in as` chooser may be outside the page DOM.
 The script worker starts a scoped PowerShell UI Automation helper that invokes

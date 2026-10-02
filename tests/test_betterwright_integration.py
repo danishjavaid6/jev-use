@@ -14,7 +14,7 @@ from jev_use import betterwright
 
 HTML = b'''<button id="account" onclick="setTimeout(()=>document.getElementById('login').hidden=false,100)">Test account</button>
 <div id="login" role="dialog" hidden><label>Password<input id="pass" type="password"></label>
-<button onclick="if(document.getElementById('pass').value==='fixture-only'){document.getElementById('done').textContent='Logged in';document.getElementById('login').hidden=true;alert('Welcome')}">Log in</button></div><div id="done"></div>'''
+<button onclick="if(document.getElementById('pass').value==='fixture-only'){document.getElementById('done').textContent='Logged in';document.getElementById('login').hidden=true;alert('Welcome')}">Log in</button></div><div id="done"></div><div role="button" onclick="window.createClicks=(window.createClicks||0)+1;setTimeout(()=>document.getElementById('created').textContent=&quot;Success! You've created Fixture Page&quot;,250)">Create Page</div><div id="created"></div>'''
 
 
 @pytest.mark.skipif(not os.environ.get('JEV_TEST_CHROME'), reason='set JEV_TEST_CHROME for actual SDK/CDP test')
@@ -55,6 +55,22 @@ def test_persistent_sdk_login_alert_and_hard_timeout(monkeypatch):
             reserve = betterwright.run_script(port, "workflow.begin('fixture-run','fixture-account'); workflow.status().browsed=true; return workflow.beforeCreate('Fixture Page')", timeout=30)
             assert reserve['ok'], reserve
             assert reserve['result']['stage'] == 'submission_reserved'
+            # Inspection does not consume submission permission; invalid selectors are safe.
+            inspection = betterwright.run_script(port, "return workflow.status().stage", timeout=30)
+            assert inspection['result'] == 'submission_reserved'
+            with pytest.raises(betterwright.BetterWrightError):
+                betterwright.run_script(port, 'return 1', timeout=30, submission={"run_id":"fixture-run", "account":"fixture-account", "selector":"#missing"})
+            restored = betterwright.run_script(port, "workflow.begin('fixture-run','fixture-account'); return workflow.status().stage", timeout=30)
+            assert restored['result'] == 'submission_reserved', restored
+            created = betterwright.run_script(port, "return await workflow.confirmCreated()", timeout=30, submission={"run_id":"fixture-run", "account":"fixture-account"})
+            assert created['ok'], created
+            assert created['result']['stage'] == 'created'
+            clicks = betterwright.run_script(port, 'return await page.evaluate(()=>window.createClicks)', timeout=30)
+            assert clicks['result'] == 1
+            with pytest.raises(betterwright.BetterWrightError):
+                betterwright.run_script(port, 'return 1', timeout=30, submission={"run_id":"fixture-run", "account":"fixture-account"})
+            reserve = betterwright.run_script(port, "workflow.begin('timeout-run','fixture-account'); workflow.status().browsed=true; return workflow.beforeCreate('Timeout Page')", timeout=30)
+            assert reserve['ok'], reserve
             # A second CDP client is supported: do not diagnose single-websocket ownership.
             from jev_use.harness import Harness
             harness = Harness(port=port)
@@ -65,14 +81,14 @@ def test_persistent_sdk_login_alert_and_hard_timeout(monkeypatch):
                 harness.close()
             started = time.monotonic()
             with pytest.raises(betterwright.BetterWrightError, match='deadline'):
-                betterwright.run_script(port, "await workflow.submitCreation({selector:'#account'}); await page.locator('#never').waitFor({timeout:60000})", timeout=1)
+                betterwright.run_script(port, "await page.locator('#never').waitFor({timeout:60000})", timeout=1, submission={"run_id":"timeout-run", "account":"fixture-account", "selector":"#account"})
             assert time.monotonic() - started < 8
             assert port not in betterwright._BRIDGES
             assert betterwright.ws_url_for(port)  # Browser survives a failed script.
             result = betterwright.run_script(port, 'return page.url()', timeout=30)
             assert result['ok'], result
             assert result['result'] == url
-            result = betterwright.run_script(port, "workflow.begin('fixture-run','fixture-account'); await workflow.submitCreation({selector:'#account'}); return 'must not run'", timeout=30)
+            result = betterwright.run_script(port, "workflow.begin('timeout-run','fixture-account'); await workflow.submitCreation({selector:'#account'}); return 'must not run'", timeout=30)
             assert not result['ok']
             assert 'only be attempted once' in result['error']
             assert any(item['stage'] == 'submitting' for item in result['workflowCheckpoints'].values())

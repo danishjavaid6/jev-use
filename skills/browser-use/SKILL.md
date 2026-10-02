@@ -58,34 +58,40 @@ Do not operate the same page the user is actively editing.
    state before retrying: a submission may already have committed.
    `settle` is SECONDS, limited to 0–10: use `5`, never `5000`. Stop after two
    failed actions on the same control and inspect the real target.
-   Prepared scripts include a `workflow` helper for repeated account jobs:
-   `workflow.begin(runId, account)`, `await workflow.browseFeed({seconds:30})`,
-   `workflow.beforeCreate(pageName)`, `await workflow.submitCreation({selector})`,
-   `await workflow.confirmCreated({selector,
-   expectedText})`, and `workflow.loggedOut()`. Use these checkpoints so a
-   timeout or logout failure cannot silently submit a duplicate Page. The helper
-   waits for conditions rather than fixed sleeps and accepts a signed-in marker
-   when a saved account skips the password prompt.
-   For repeated Facebook Page-creation tasks, use these helpers. After confirming
-   the selected account is logged in, scroll its feed and play visible videos for
-   30 seconds BEFORE opening the creation form. If playback is not observed,
-   inspect the visible Videos/Reels entry and complete that step; do not report
-   playback that did not occur. Skip only if the user explicitly asks to skip it.
-   Reserve creation with `workflow.beforeCreate` and END THAT SCRIPT CALL. The
-   next call uses `workflow.submitCreation`, waits for an exact creation notice,
-   and uses `workflow.confirmCreated`. This extra boundary saves the reservation
-   to disk before the click, protecting against hard timeouts. Never bypass the
-   helper with a raw Create Page click after a reservation. Use a stable run ID
-   across retries and the same account ID; changing it defeats duplicate checks.
-   Start each phase with `workflow.begin` using the same IDs, including after
-   reconnecting. Inspect and fill the form BEFORE reserving the submission; the
-   immediate next script should submit and confirm, not inspect or refill.
-   When attaching to a profile opened elsewhere, supply a stable non-secret
-   `checkpoint_scope` on every script call. GoLogin profiles opened by this MCP
-   server use their profile ID automatically. Do not use passwords as IDs.
-   `confirmCreated` must observe a creation notice with the exact submitted Page
-   name, or the new Page's actual ID/URL. Search matches and the filled name input
-   alone are not proof. Record `loggedOut` only after verifying the chooser returned.
+   Repeated Facebook Page jobs MUST reuse the supplied workflow helpers, not
+   re-discover the same flow or invent manual fallback clicks:
+   - `workflow.begin(runId, account)` uses stable IDs across retries.
+   - `workflow.loginSavedAccount({accountName,password})` selects the saved card,
+     waits for either password OR signed-in state, and submits the password with
+     Enter. Caller may override observed account/signed-in selectors if needed.
+   - `await workflow.browseFeed({seconds:30})` before opening the Create Page form.
+     If no video plays, inspect Videos/Reels once; never invent playback.
+   - `workflow.fillPage({pageName,bio})` fills name/category/bio, waits for the
+     Reel creator suggestion, selects it, and verifies the Create Page control
+     is actionable WITHOUT clicking. Do not use a keyboard category fallback.
+   - `workflow.beforeCreate(pageName)` saves a reservation; end this call.
+   - Submit through the tool's `submission:{run_id,account}` argument. Default
+     control is the button ROLE named Create Page (including div[role=button]).
+     The tool checks actionability BEFORE reserving the attempt on disk. Reads
+     and selector-validation failures no longer consume submission permission.
+     Code runs AFTER that one click: `await workflow.confirmCreated(); return
+     await workflow.logout();` batches delayed confirmation and logout.
+   - Confirmation waits up to 30 seconds for the exact creation notice. Never
+     treat a disabled button or unchanged URL as proof of failure. Once clicked,
+     retry only confirmation or logout. NEVER manually click Create Page again,
+     clear the journal, change run IDs, or infer completion solely from an
+     "already manage a Page" error. Observe the actual notice or Page ID/URL.
+   - `workflow.logout()` accepts the wizard's beforeunload, navigates to the
+     observed main Facebook URL, opens the Your profile button by role (no
+     aria-haspopup assumptions), clicks Log Out, and waits for the chooser.
+     Do not invent logout.php tokens, clear cookies, probe hidden APIs, or search
+     for the created Page by name. Caller may override observed menu selectors.
+   Typically use two calls/account: login+browse+fill+reserve, then tool submission
+   with code confirm+logout. A confirmed selector mismatch permits one inspection
+   and correction; do not inspect between every successful step. Start each
+   phase with the same workflow.begin IDs after reconnecting. Use a stable
+   checkpoint_scope when attaching to a profile opened elsewhere; this server
+   uses the GoLogin profile ID automatically when it opened the profile.
    Keep default overlay dismissal enabled: the screenshot's Sign in as chooser
    is a blocking credential selector, separate from Facebook's password form.
    On Windows its scoped Close button is also handled through UI Automation.

@@ -515,6 +515,7 @@ TOOLS: list[dict[str, Any]] = [
                     "description": (
                         "Playwright JavaScript executed by BetterWright. Use page, "
                         "snapshot, human, and screenshot; return a short JSON-safe result. "
+                        "Use submission={run_id,account} to click Create Page once before this code; confirmCreated and logout can then run together. "
                         "Repeated account workflows also have a checkpointed workflow helper: "
                         "begin, browseFeed, beforeCreate, confirmCreated, and loggedOut."
                     ),
@@ -537,6 +538,17 @@ TOOLS: list[dict[str, Any]] = [
                 "page_url": {
                     "type": "string",
                     "description": "Exact existing tab URL to select when multiple tabs are open. Omit on subsequent script calls to keep the selected tab.",
+                },
+                "submission": {
+                    "type": "object",
+                    "description": "Explicit Create Page attempt. Checks actionability without clicking first, preserves reservations on selector failure, then journals and clicks once. Code runs afterward to confirm and logout. Never include another creation click in code.",
+                    "properties": {
+                        "run_id": {"type": "string"},
+                        "account": {"type": "string"},
+                        "selector": {"type": "string", "description": "Optional observed selector; default is role=button named Create Page, including div role=button."},
+                    },
+                    "required": ["run_id", "account"],
+                    "additionalProperties": False,
                 },
                 "checkpoint_scope": {
                     "type": "string",
@@ -1095,6 +1107,8 @@ def tool_browser_script(args: dict[str, Any]) -> str:
         scope = "gologin:" + owner.profile.id
     if scope:
         options["checkpoint_scope"] = str(scope)
+    if args.get("submission") is not None:
+        options["submission"] = args["submission"]
     result = betterwright.run_script(port, code, **options)
     if not result.get("ok"):
         raise betterwright.BetterWrightError(json.dumps(result, ensure_ascii=False))

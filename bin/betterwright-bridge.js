@@ -92,23 +92,36 @@ async function serve() {
         nativeDialogs = await watchNativeDialogs(request.ws, request.target_id, request.dismiss_overlays !== false);
       }
       if (nativeDialogs) await nativeDialogs.toggle(request.dismiss_overlays !== false);
-      // Reserve on disk BEFORE executing the next script. A hard timeout cannot
-      // turn an uncertain submission into permission to create a duplicate.
+      // Reads never consume reservations. Only an explicit submission request
+      // runs an actionability check, then journals the attempt before the click.
       const permits = [];
-      for (const [key, checkpoint] of Object.entries(checkpoints)) {
-        if (checkpoint.stage === 'submission_reserved') { checkpoint.stage = 'submitting'; permits.push(key); }
-      }
       const persist = () => {
         const temporary = checkpointFile + '.tmp';
         fs.writeFileSync(temporary, JSON.stringify(checkpoints), { mode: 0o600 });
         fs.renameSync(temporary, checkpointFile);
       };
+      if (request.submission) {
+        const submission = request.submission;
+        if (!submission.run_id || !submission.account) throw new Error('submission requires run_id and account');
+        const probeCode = prelude + `state.jevWorkflow = ${JSON.stringify(checkpoints)};\n` + helpers + `
+workflow.begin(${JSON.stringify(submission.run_id)}, ${JSON.stringify(submission.account)});
+await workflow.validateCreation(${JSON.stringify({selector: submission.selector, timeout: 5000})});
+return JSON.parse(JSON.stringify(state.jevWorkflow));
+`;
+        const validated = await browser.run(probeCode, { session: selectedSession, timeout: request.timeout });
+        if (!validated.ok) throw new Error(JSON.stringify(validated));
+        checkpoints = validated.result;
+        const key = JSON.stringify([String(submission.run_id), String(submission.account)]);
+        checkpoints[key].stage = 'submitting';
+        permits.push(key);
+      }
       persist();
       const restore = `state.jevWorkflow = ${JSON.stringify(checkpoints)}; state.jevSubmissionPermits = ${JSON.stringify(permits)};\n`;
+      const submitCode = request.submission ? `workflow.begin(${JSON.stringify(request.submission.run_id)}, ${JSON.stringify(request.submission.account)}); await workflow.submitCreation(${JSON.stringify({selector: request.submission.selector})});\n` : '';
       const wrapped = prelude + restore + helpers + `
 let value;
 let failure;
-try { value = await (async () => { ${request.code}\n })(); }
+try { value = await (async () => { ${submitCode}${request.code}\n })(); }
 catch (error) { failure = error.message; }
 return { value, failure, checkpoints: JSON.parse(JSON.stringify(state.jevWorkflow || {})) };
 `;

@@ -21,6 +21,36 @@ const workflow = {
     ]).catch(() => { throw new Error('Neither password prompt nor signed-in marker appeared; inspect once instead of repeating clicks'); });
     return winner;
   },
+  async loginSavedAccount({ accountName, password, accountSelector, signedInSelector, timeout = 20000 }) {
+    const card = accountSelector ? page.locator(accountSelector) : page.getByRole('button').filter({ hasText: accountName });
+    await card.waitFor({ state: 'visible', timeout });
+    await card.click();
+    const input = page.locator('input[name="pass"]').first();
+    const signedIn = signedInSelector ? page.locator(signedInSelector) : page.getByRole('button', { name: 'Your profile', exact: true });
+    const winner = await Promise.any([
+      input.waitFor({ state: 'visible', timeout }).then(() => 'password'),
+      signedIn.waitFor({ state: 'visible', timeout }).then(() => 'signed_in')
+    ]).catch(() => { throw new Error('Login did not reach a password prompt or signed-in marker; inspect once'); });
+    if (winner === 'password') {
+      await input.fill(password);
+      await input.press('Enter');
+      await signedIn.waitFor({ state: 'visible', timeout });
+    }
+    return winner;
+  },
+  async fillPage({ pageName, bio, category = 'Reel creator', nameSelector, categorySelector, optionSelector, bioSelector, timeout = 10000 }) {
+    const name = nameSelector ? page.locator(nameSelector) : page.getByRole('textbox', { name: /^Page name/i });
+    const categories = categorySelector ? page.locator(categorySelector) : page.getByRole('combobox', { name: /^Category/i });
+    const description = bioSelector ? page.locator(bioSelector) : page.getByRole('textbox', { name: /^Bio/i });
+    await name.fill(pageName);
+    await categories.fill(category);
+    const option = optionSelector ? page.locator(optionSelector) : page.getByText(category, { exact: true }).last();
+    await option.waitFor({ state: 'visible', timeout });
+    await option.click();
+    await description.fill(bio);
+    await this.creationControl().click({ trial: true, timeout });
+    return { formReady: true };
+  },
   async browseFeed({ seconds = 30 } = {}) {
     if (!Number.isFinite(seconds) || seconds < 0 || seconds > 60) throw new Error('Feed duration must be 0–60 seconds');
     const checkpoint = this.status();
@@ -61,26 +91,63 @@ const workflow = {
     checkpoint.stage = 'submission_reserved';
     return checkpoint;
   },
-  async submitCreation({ selector, timeout = 10000 }) {
+  creationControl(selector) {
+    return selector ? page.locator(selector) : page.getByRole('button', { name: 'Create Page', exact: true });
+  },
+  async validateCreation({ selector, timeout = 5000 } = {}) {
+    const checkpoint = this.status();
+    if (checkpoint.stage !== 'submission_reserved') throw new Error(`Creation is ${checkpoint.stage}; inspect existing results, never manually click again`);
+    // Trial performs actionability checks without clicking or consuming the reservation.
+    await this.creationControl(selector).click({ trial: true, timeout });
+  },
+  async submitCreation({ selector, timeout = 10000 } = {}) {
     const checkpoint = this.status();
     const key = state.jevWorkflowActive;
     const permits = state.jevSubmissionPermits || [];
     if (checkpoint.stage !== 'submitting' || !permits.includes(key)) {
-      throw new Error('Persist workflow.beforeCreate in a separate script call first. A reserved submission can only be attempted once; inspect uncertain results before continuing.');
+      throw new Error('Use browser_script submission={run_id,account} after beforeCreate. Creation can only be attempted once; inspect uncertain results, never use a raw click fallback.');
     }
     state.jevSubmissionPermits = permits.filter(item => item !== key);
-    await page.locator(selector).click({ timeout });
+    await this.creationControl(selector).click({ timeout });
   },
-  async confirmCreated({ selector, expectedText, pageUrl = null, pageId = null, timeout = 20000 }) {
+  async confirmCreated({ selector, expectedText, pageUrl = null, pageId = null, timeout = 30000 } = {}) {
     const checkpoint = this.status();
+    if (checkpoint.stage === 'created' || checkpoint.stage === 'logged_out') return checkpoint;
     if (checkpoint.stage !== 'submitting') throw new Error('No pending creation to confirm');
-    if (!expectedText || !expectedText.includes(checkpoint.pageName)) throw new Error('Confirmation must include the exact submitted Page name');
-    if (!/was created|you.ve created|page created|success/i.test(expectedText) && !pageUrl && !pageId) throw new Error('Require a creation notice or the observed new Page ID/URL, not a search result or filled input');
-    const confirmation = page.locator(selector).filter({ hasText: expectedText });
+    let confirmation;
+    if (selector && expectedText) {
+      if (!expectedText.includes(checkpoint.pageName)) throw new Error('Confirmation must include the exact submitted Page name');
+      if (!/was created|you.ve created|page created|success/i.test(expectedText) && !pageUrl && !pageId) throw new Error('Require a creation notice or the observed new Page ID/URL, not a search result or filled input');
+      confirmation = page.locator(selector).filter({ hasText: expectedText });
+    } else {
+      const name = checkpoint.pageName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      confirmation = page.getByText(new RegExp(`(?:you.ve created.*${name}|${name}.*was created)`, 'i')).last();
+    }
     await confirmation.waitFor({ state: 'visible', timeout });
-    checkpoint.confirmation = { text: expectedText, pageUrl, pageId };
+    checkpoint.confirmation = { text: expectedText || await confirmation.innerText(), pageUrl, pageId };
     checkpoint.stage = 'created';
     return checkpoint;
+  },
+  async logout({ chooserSelector = 'text=Use another profile', profileSelector, logoutSelector, timeout = 20000 } = {}) {
+    if (this.status().stage !== 'created') throw new Error('Confirm creation before logout');
+    // Optional wizard: accept leaving once; never invent tokenless logout URLs.
+    await dialogs.acceptNext();
+    await page.goto('https://www.facebook.com/', { waitUntil: 'domcontentloaded', timeout });
+    const chooser = page.locator(chooserSelector);
+    if (!await chooser.isVisible()) {
+      const profile = profileSelector ? page.locator(profileSelector) : page.getByRole('button', { name: 'Your profile', exact: true });
+      await profile.waitFor({ state: 'visible', timeout });
+      await profile.click();
+      const logout = logoutSelector ? page.locator(logoutSelector) : page.getByText(/^Log out$/i).last();
+      await logout.waitFor({ state: 'visible', timeout });
+      await dialogs.acceptNext();
+      try { await logout.click({ timeout }); }
+      catch (error) {
+        if (!/execution context.*destroyed|navigation|target.*closed/i.test(error.message)) throw error;
+      }
+    }
+    await chooser.waitFor({ state: 'visible', timeout });
+    return this.loggedOut();
   },
   loggedOut() {
     const checkpoint = this.status();
