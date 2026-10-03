@@ -1,15 +1,19 @@
 """Built-in fallback for harnesses that fail to load MCP tools."""
 import argparse
+import base64
 import json
 import sys
+import tempfile
 from . import mcp_server
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("tool", choices=list(mcp_server.HANDLERS))
-    for name in ("profile", "url", "goal", "serial", "vendor", "action", "label", "text", "code"):
+    for name in ("profile", "url", "goal", "serial", "vendor", "action", "account", "label", "text", "code"):
         parser.add_argument("--" + name)
     parser.add_argument("--port", type=int)
+    parser.add_argument("--timeout", type=float)
+    parser.add_argument("--include-screenshot", action="store_true", default=None)
     parser.add_argument("--act", action="store_true", default=None)
     parser.add_argument("--headless", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--json-file", help="Advanced arguments as JSON in a file; avoids shell quoting.")
@@ -32,7 +36,12 @@ def main() -> int:
     })
     result = response["result"]
     for block in result["content"]:
-        print(block.get("text", ""))
+        if block.get("type") == "image":
+            with tempfile.NamedTemporaryFile(prefix="jev-phone-", suffix=".png", delete=False) as capture:
+                capture.write(base64.b64decode(block["data"], validate=True))
+                print("screenshot=" + capture.name)
+        else:
+            print(block.get("text", ""))
     return 1 if result.get("isError") else 0
 
 if __name__ == "__main__":

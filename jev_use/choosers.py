@@ -153,7 +153,7 @@ def deterministic_decision(goal: str, observation: Any) -> Decision | None:
             matches = [
                 c
                 for c in observation.targets_for("click_element")
-                if _normalize(c.get("label", "")) == wanted
+                if wanted in {_normalize(c.get("label", "")), _normalize(c.get("description", ""))}
             ]
             if len(matches) == 1:
                 return Decision(

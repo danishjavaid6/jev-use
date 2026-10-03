@@ -24,7 +24,9 @@ const facebookPages = {
   },
   async login(config, checkpoint, timeout = 60000) {
     const accountName = config.account_name || config.account;
-    const deadline = Date.now() + timeout;
+    const started = Date.now();
+    const deadline = started + timeout;
+    let identityObserved = false;
     const input = page.locator('input[name="pass"]').first();
     const card = config.account_selector ? page.locator(config.account_selector)
       : page.getByRole('button').filter({ hasText: accountName });
@@ -44,6 +46,7 @@ const facebookPages = {
         if (/execution context.*destroyed|navigation|cannot find context/i.test(error.message)) return null;
         throw error;
       });
+      identityObserved = Boolean(identity);
       if (identity && (identity.matched || config.account_id === identity.id)) {
         checkpoint.accountId = identity.id;
         return 'signed_in';
@@ -60,7 +63,17 @@ const facebookPages = {
       }
       await page.waitForTimeout(500); // Bounded polling for hydration/identity, not a reload loop.
     }
-    throw new Error('Login identity did not become verifiable within 60 seconds; inspect once. Keep this checkpoint and do not seed identity manually.');
+    // Report observations, never infer expired sessions from an inert saved card.
+    // Keep this non-secret: no page HTML, cookies, or password values in journals.
+    checkpoint.loginObservation = {
+      elapsedMs: Date.now() - started,
+      identityPresent: identityObserved,
+      passwordPromptVisible: await input.isVisible().catch(() => false),
+      savedCardVisible: await card.isVisible().catch(() => false),
+      cardSelectionAttempted: Boolean(checkpoint.loginCardClicked),
+      passwordSubmissionAttempted: Boolean(checkpoint.loginSubmitted)
+    };
+    throw new Error(`Login identity did not become verifiable within ${timeout / 1000} seconds; ${JSON.stringify(checkpoint.loginObservation)}. Inspect once, including browser-owned popups if native dialog monitoring warned. Saved cards do not prove active or expired sessions. Keep this checkpoint and do not seed identity manually.`);
   },
   async assertAccount(checkpoint) {
     if (!checkpoint.accountId || await this.activeAccountId() !== checkpoint.accountId) {

@@ -481,6 +481,8 @@ def derive_label(element: ET.Element, index: dict[int, Node]) -> str:
         if child is element:
             continue
         child_node = index.get(id(child))
+        if child_node is not None and child_node.password:
+            continue
         if child_node is not None and (child_node.clickable or child_node.editable):
             continue
         text = (_attr(child, "text") or _attr(child, "content-desc")).strip()
@@ -641,7 +643,7 @@ def position_hint(node: Node, screen: tuple[int, int]) -> str:
 
 
 def describe(node: Node) -> str:
-    label = node.label()
+    label = "[password field]" if node.password else node.label()
     text = f'{role_of(node)} "{label}"' if label else role_of(node)
     if node.password:
         # Never echo what is in a password field, and say so: the model needs to
@@ -734,7 +736,7 @@ def build_candidates(nodes: list[Node], screen: tuple[int, int]) -> list[dict[st
         {
             "id": str(node.ref),
             "role": role_of(node),
-            "label": node.label(),
+            "label": "[password field]" if node.password else node.label(),
             "bounds": node.bounds,
             "centred": node.centre,
             "package": node.package,
@@ -924,6 +926,10 @@ def parse_primary_location(text: str) -> str | None:
             return remainder
         for following in lines[index + 1 :]:
             if following:
+                # A partially rendered page may show only the explanation or
+                # navigation below the heading. Those are not location values.
+                if following.casefold().startswith(("primary location is determined", "learn more", "loading")) or following.casefold() in ("back", "your primary location"):
+                    return None
                 return following
     return None
 
@@ -934,11 +940,23 @@ def is_signed_out(text: str) -> bool:
     return any(marker in lowered for marker in _LOGIN_MARKERS)
 
 
+def location_screen_state(text: str) -> str | None:
+    """Recognize blockers from the screen, never from VPN or account geography."""
+    lowered = text.casefold()
+    if "use fingerprint to unlock" in lowered or "swipe to unlock" in lowered or "emergency call" in lowered and "unlock" in lowered:
+        return "locked"
+    if "connection lost" in lowered or "webpage not available" in lowered or "network cannot access the internet" in lowered:
+        return "network_error"
+    if is_signed_out(text):
+        return "login"
+    return None
+
+
 @dataclass
 class AccountLocation:
     """What one check of the signed-in account's location page found.
 
-    `state` is `"location"`, `"login"` or `"unknown"` — the last meaning the page
+    `state` is `"location"`, `"login"`, `"locked"`, `"network_error"` or `"unknown"` — the last meaning the page
     neither named a location nor showed a sign-in form, which on a live phone
     means it had not finished rendering.
     """
@@ -960,6 +978,10 @@ class AccountLocation:
             lines.append(f"location={self.location}")
         elif self.state == "login":
             lines.append("location=(none — the app is showing a sign-in page)")
+        elif self.state == "locked":
+            lines.append("location=(none — unlock the phone and retry)")
+        elif self.state == "network_error":
+            lines.append("location=(none — restore the phone's internet connection and retry)")
         else:
             lines.append("location=(none found — the page had not rendered; see 'shows' below)")
         lines.append(f"seconds={self.seconds:.2f}")
@@ -999,14 +1021,14 @@ def account_location(
     while True:
         text = screen_text(serial)
         location = parse_primary_location(text)
-        if location or is_signed_out(text):
+        if location or location_screen_state(text):
             break
         if time.perf_counter() >= deadline:
             break
         time.sleep(max(0.0, poll))
 
     location = parse_primary_location(text) or ""
-    state = "location" if location else "login" if is_signed_out(text) else "unknown"
+    state = "location" if location else location_screen_state(text) or "unknown"
     return AccountLocation(
         serial=serial,
         url=target,

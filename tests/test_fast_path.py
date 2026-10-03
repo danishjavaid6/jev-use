@@ -54,6 +54,35 @@ def test_cli_preserves_spaced_arguments_and_port(monkeypatch, capsys):
     assert capsys.readouterr().out == "page text\n"
 
 
+def test_cli_facebook_arguments_do_not_require_a_json_file(monkeypatch, capsys):
+    monkeypatch.setattr(sys, 'argv', ['jev-use', 'android_facebook', '--serial', 'S', '--action', 'location',
+                                    '--account', 'Name With Spaces', '--timeout', '20'])
+    monkeypatch.setattr(mcp_server, 'load_env', lambda: None)
+    def workflow(args):
+        assert args == {'serial': 'S', 'action': 'location', 'account': 'Name With Spaces', 'timeout': 20.0}
+        return '{"state":"location"}'
+    monkeypatch.setitem(mcp_server.HANDLERS, 'android_facebook', workflow)
+    assert tool_cli.main() == 0
+    assert '"state":"location"' in capsys.readouterr().out
+
+
+def test_cli_screenshot_returns_a_file_path_instead_of_base64(monkeypatch, capsys, tmp_path):
+    import base64
+    monkeypatch.setattr(sys, 'argv', ['jev-use', 'android_read', '--include-screenshot'])
+    monkeypatch.setattr(mcp_server, 'load_env', lambda: None)
+    monkeypatch.setattr(tool_cli.tempfile, 'tempdir', str(tmp_path))
+    png = b'\x89PNG\r\n\x1a\nfixture'
+    monkeypatch.setitem(mcp_server.HANDLERS, 'android_read', lambda args: [
+        {'type': 'text', 'text': 'screen controls'},
+        {'type': 'image', 'mimeType': 'image/png', 'data': base64.b64encode(png).decode('ascii')}])
+    assert tool_cli.main() == 0
+    output = capsys.readouterr().out
+    capture = output.split('screenshot=')[1].strip()
+    from pathlib import Path
+    assert Path(capture).read_bytes() == png
+    assert base64.b64encode(png).decode('ascii') not in output
+
+
 def test_browser_exit_is_reported_without_waiting_launch_timeout(monkeypatch, tmp_path):
     monkeypatch.setattr(profiles, "_cdp_alive", lambda port: False)
     monkeypatch.setattr(profiles, "prepare_profile", lambda *a, **kw: tmp_path)

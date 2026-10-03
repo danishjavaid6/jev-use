@@ -67,14 +67,15 @@ test('real Node-to-Python launcher discovers browser and mobile tools outside pr
   const real = { command: process.execPath, args: [path.resolve(__dirname, '..', 'bin', 'jev-use-mcp.js')] };
   const result = await probe(real, { cwd: os.tmpdir() });
   assert.equal(result.ok, true, result.error);
-  assert.equal(result.tools.length, 13);
+  assert.equal(result.tools.length, 14);
   assert.ok(result.tools.includes('browser_profiles'));
   assert.ok(result.tools.includes('browser_action'));
   assert.ok(result.tools.includes('android_use'));
+  assert.ok(result.tools.includes('android_facebook'));
   if (process.platform === 'win32') {
     const registered = { command: commandcode.quoteWindows(real.command), args: real.args.map(commandcode.quoteWindows) };
     const shellResult = await probe(registered, { shell: true, cwd: os.tmpdir() });
     assert.equal(shellResult.ok, true, shellResult.error);
-    assert.equal(shellResult.tools.length, 13);
+    assert.equal(shellResult.tools.length, 14);
   }
 });

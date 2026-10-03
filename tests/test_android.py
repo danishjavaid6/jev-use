@@ -700,6 +700,25 @@ def test_deterministic_decision_handles_back_and_scroll() -> None:
     assert deterministic_decision("open the settings app", obs) is None
 
 
+def test_exact_description_selects_unlabelled_control_without_guessing() -> None:
+    from jev_use.choosers import deterministic_decision
+    obs = observation('''<hierarchy>
+      <node class="android.view.View" clickable="true" resource-id="app:id/nav"
+      bounds="[720,1920][900,2060]" />
+      <node class="android.view.View" clickable="true" resource-id="app:id/nav"
+      bounds="[900,1920][1080,2060]" />
+    </hierarchy>''')
+    assert deterministic_decision('tap view', obs) is None
+    assert deterministic_decision('open the menu', obs) is None
+    target = obs.targets[1]
+    decision = deterministic_decision('tap ' + target['description'], obs)
+    assert decision.element_id == target['id']
+    assert decision.confidence == 1.0
+    assert decision.source == 'deterministic'
+    obs.targets[0]['description'] = target['description']
+    assert deterministic_decision('tap ' + target['description'], obs) is None
+
+
 def test_deterministic_decision_leaves_compound_goals_to_jev() -> None:
     """A prefix match would run the first clause and drop the rest."""
     from jev_use.choosers import deterministic_decision
@@ -751,13 +770,13 @@ def test_navigation_operations_are_always_offered() -> None:
 def test_text_target_head_contains_only_fillable_fields() -> None:
     heads = observation().target_heads()
     labels = {c["id"]: c["label"] for c in observation().candidates}
-    assert {labels[i] for i in heads["text_target"]} == {"Email", "Password"}
+    assert {labels[i] for i in heads["text_target"]} == {"Email", "[password field]"}
     assert any(labels[i] == "Sign in" for i in heads["click_target"])
 
 
 def test_targets_for_respects_the_operation() -> None:
     obs = observation()
-    assert {c["label"] for c in obs.targets_for("type_text")} == {"Email", "Password"}
+    assert {c["label"] for c in obs.targets_for("type_text")} == {"Email", "[password field]"}
     assert any(c["label"] == "Sign in" for c in obs.targets_for("click_element"))
     assert obs.targets_for("go_back") == []
 
@@ -800,6 +819,7 @@ def test_readouts_never_leak_a_password_value() -> None:
     assert "hunter2" not in " ".join(obs.readouts())
     assert "hunter2" not in obs.read()
     assert "[password field]" in obs.read()
+    assert 'hunter2' not in str(obs.candidates)
 
 
 def test_read_joins_the_visible_text() -> None:
@@ -1041,6 +1061,11 @@ def test_a_page_without_the_label_yields_nothing() -> None:
     assert android.parse_primary_location("") is None
 
 
+@pytest.mark.parametrize('following', ['Primary location is determined by information we use', 'Learn more', 'Back', 'Loading…'])
+def test_location_explanation_or_navigation_is_not_a_location(following):
+    assert android.parse_primary_location('Your primary location is near:\n' + following) is None
+
+
 def test_a_sign_in_page_is_recognised() -> None:
     assert android.is_signed_out(SIGN_IN_PAGE) is True
     assert android.is_signed_out(LOCATION_PAGE) is False
@@ -1119,6 +1144,18 @@ def test_a_page_that_never_renders_gives_up_at_the_timeout(
     assert found.location == ""
     assert found.state == "unknown"
     assert found.seconds >= 0.0
+
+
+@pytest.mark.parametrize('text,state', [('Connection lost\nTap to retry\nWebpage not available', 'network_error'),
+                                       ('Unlock\nUse fingerprint to unlock\nCharging 7%', 'locked')])
+def test_location_blockers_return_immediately_instead_of_waiting_full_timeout(monkeypatch, text, state):
+    monkeypatch.setattr(android, 'open_facebook_page', lambda serial, url: None)
+    monkeypatch.setattr(android, 'screen_text', lambda serial: text)
+    monkeypatch.setattr(android.time, 'sleep', lambda seconds: pytest.fail('known blocker must not keep polling'))
+    found = android.account_location('S', timeout=30)
+    assert found.state == state
+    assert found.location == ''
+    assert state in found.describe()
 
 
 def test_the_location_tool_defaults_are_single_sourced() -> None:

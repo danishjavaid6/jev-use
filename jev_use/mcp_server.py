@@ -17,13 +17,14 @@ every turn:
     android_use        drive the phone toward a goal; Jev picks each action
     android_read       return the screen's text
     android_location   the location Facebook attributes to the signed-in account
+    android_facebook   deterministic saved-account location workflow
 
-Android is four tools rather than five on purpose. It needs no CDP equivalent
-(adb is the channel, and it is always there), and it needs no `extract`: the view
+Android needs no CDP equivalent (adb is the channel, and it is always there),
+and it needs no `extract`: the view
 hierarchy yields a kilobyte or two of text, where a web dashboard yields twenty,
-so handing the harness the text costs almost nothing. `android_location` is the
-one app-shaped tool — it exists because Facebook's own page is the only authority
-on what the app believes about where the account is.
+so handing the harness the text costs almost nothing. The Facebook workflow
+keeps repeated account navigation and identity checks out of the model loop;
+Facebook's own page is the authority on its inferred primary location.
 
 The desktop / accessibility surface was removed. On GNOME/Wayland it cannot
 attach to an existing browser profile, and that dead end is what made agents
@@ -40,6 +41,7 @@ Speaks MCP over stdio. Nothing but JSON-RPC goes to stdout.
 from __future__ import annotations
 
 import atexit
+import base64
 import json
 import math
 import os
@@ -61,6 +63,7 @@ from .profiles import find_profile, profile_registry as local_profiles, start_pr
 from .text_model import TextModel
 
 from . import android as android_engine
+from . import facebook_android
 from . import gologin
 from . import harness
 from . import betterwright
@@ -317,8 +320,21 @@ most; report failures and stop. Quote only what you read.
 MOBILE_PROMPT_NAME = "mobile-use"
 
 MOBILE_PROMPT_TEMPLATE = """Task: {task}
-Call android_devices once. Use android_read to read and android_use(act=true)
-to perform the requested action. Pass serial when several devices are connected.
+Call android_devices once; run phone calls sequentially and reuse its serial.
+For Facebook account locations, use android_facebook(action="accounts") once,
+then android_facebook(action="location", account="EXACT_RETURNED_NAME") per account.
+This handles account selection, login waits, and identity verification without
+model-guessed taps. Quote location only when state=location and identity_verified=true.
+For locked/network_error/login/authentication_required, report the required user
+action. For timeout/unsupported_ui/identity_mismatch, inspect once with
+android_read(include_screenshot=true); never repeat an uncertain account switch.
+Primary location is inferred; these tools do not write it. A profile-city edit
+or location-tagged post is a separate action; clarify ambiguous "post location"
+requests instead of assuming fraud or inventing a write operation.
+For other tasks use android_read and android_use(act=true). Unique exact control
+descriptions support deterministic taps with max_steps=1, decompose=false,
+use_cache=false. Inspect screenshot for unlabelled controls; do not guess meanings.
+Pass serial when several devices are connected.
 Read again to verify. If tools are missing use `jev-use call <tool>` in the shell.
 No helper clients or repair loops. Retry a transient failure once; otherwise
 report it and stop. The phone must be unlocked with USB debugging accepted.
@@ -686,12 +702,28 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "android_read",
-        "description": "Return the current phone screen text without a model request.",
+        "description": "Read phone text and exact tappable controls. Set include_screenshot=true to inspect unlabelled icons; do not guess their meaning.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "serial": {"type": "string", "description": "Which device, from android_devices."},
+                "include_screenshot": {"type": "boolean", "default": False, "description": "Also return the actual phone screen as an image, for unknown UI."},
             },
+        },
+    },
+    {
+        "name": "android_facebook",
+        "description": "Deterministic Facebook account workflow; no decision model needed. Call action=accounts once, then action=location with each exact returned account name. Selects once, waits for login, verifies account before/after reading, and reports locked/network/login/unsupported UI explicitly. Sequential calls only. Reads primary location; does not edit it or publish posts.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "serial": {"type": "string", "description": "Device from android_devices."},
+                "action": {"type": "string", "enum": ["accounts", "location"]},
+                "account": {"type": "string", "description": "Exact observed account name; required for action=location."},
+                "timeout": {"type": "number", "default": ANDROID_LOCATION_TIMEOUT, "minimum": 1, "maximum": 60,
+                            "description": "Seconds per login/page transition; a timed-out switch is not repeated."},
+            },
+            "required": ["action"],
         },
     },
     {
@@ -1170,24 +1202,47 @@ def tool_android_use(args: dict[str, Any]) -> str:
     return f"device={device.serial}\n" + render(result)
 
 
-def tool_android_read(args: dict[str, Any]) -> str:
+def tool_android_read(args: dict[str, Any]) -> str | list[dict[str, Any]]:
     try:
         device = android_device(args)
-        text = android_engine.snapshot(device.serial).read()
+        observation = android_engine.snapshot(device.serial)
+        text = observation.read()
     except android_engine.AdbError as exc:
         return str(exc)
 
-    if not text.strip():
-        return "(the screen returned no visible text)"
-    return f"device={device.serial}\n\n{text[:20000]}"
+    controls = "\n".join(f"- {target['description']}" for target in observation.targets)
+    parts = [f"device={device.serial}", text[:20000] or "(the screen returned no visible text)"]
+    if controls:
+        parts.append("Tappable controls (use an exact description with android_use; re-read after navigation):\n" + controls)
+    text = "\n\n".join(parts)
+    if args.get("include_screenshot", False):
+        capture = android_engine.exec_out(device.serial, ["screencap", "-p"])
+        if not capture.startswith(b"\x89PNG\r\n\x1a\n"):
+            raise android_engine.AdbError("Phone screenshot did not return a PNG; inspect the device connection.")
+        return [{"type": "text", "text": text}, {"type": "image", "mimeType": "image/png",
+                "data": base64.b64encode(capture).decode("ascii")}]
+    return text
+
+
+def tool_android_facebook(args: dict[str, Any]) -> str:
+    timeout = _bounded_number(args, "timeout", ANDROID_LOCATION_TIMEOUT, 1, 60)
+    action = args.get("action")
+    if action not in ("accounts", "location"):
+        raise ValueError("action must be accounts or location")
+    account = args.get("account")
+    if action == "location" and (not isinstance(account, str) or not account.strip()):
+        raise ValueError("account is required for action=location; use action=accounts first")
+    device = android_device(args)
+    return json.dumps(facebook_android.run(device.serial, action=action, account=account, timeout=timeout), ensure_ascii=False)
 
 
 def tool_android_location(args: dict[str, Any]) -> str:
+    timeout = _bounded_number(args, "timeout", ANDROID_LOCATION_TIMEOUT, 0, 60)
     try:
         device = android_device(args)
         found = android_engine.account_location(
             device.serial,
-            timeout=float(args.get("timeout", ANDROID_LOCATION_TIMEOUT)),
+            timeout=timeout,
         )
     except android_engine.AdbError as exc:
         return str(exc)
@@ -1217,6 +1272,7 @@ HANDLERS = {
     "android_use": tool_android_use,
     "android_read": tool_android_read,
     "android_location": tool_android_location,
+    "android_facebook": tool_android_facebook,
 }
 
 
@@ -1284,7 +1340,7 @@ def handle(request: dict[str, Any]) -> dict[str, Any] | None:
             return {
                 "jsonrpc": "2.0",
                 "id": request_id,
-                "result": {"content": [{"type": "text", "text": text}]},
+                "result": {"content": text if isinstance(text, list) else [{"type": "text", "text": text}]},
             }
         except (DriverError, betterwright.BetterWrightError) as exc:
             # A driver refusal is an operational message, not a crash: return it as
@@ -1337,13 +1393,18 @@ def main() -> int:
     write_lock = threading.Lock()
 
     def respond(request):
+        response = None
         try:
             response = handle(request)
-            if response is not None:
-                with write_lock:
-                    send(response)
         finally:
-            busy.clear()
+            # Release ownership before publishing completion. A client may send
+            # its next call as soon as it receives the response; it must not see
+            # the completed call as still busy. The same lock also protects the
+            # busy check below from observing a stale state while sending waits.
+            with write_lock:
+                busy.clear()
+                if response is not None:
+                    send(response)
 
     for line in sys.stdin:
         line = line.strip()
@@ -1354,14 +1415,14 @@ def main() -> int:
         except json.JSONDecodeError:
             continue
         if request.get("method") == "tools/call":
-            if busy.is_set():
-                with write_lock:
+            with write_lock:
+                if busy.is_set():
                     send({"jsonrpc": "2.0", "id": request.get("id"), "result": {
                         "isError": True, "content": [{"type": "text", "text": f"Request not started: {active_request.get('tool', 'another tool')} (request ID {active_request.get('id')}) is still running. Wait for that original call's result; do not issue parallel phone calls or repeat actions."}]}})
-            else:
-                active_request.update(tool=request.get("params", {}).get("name", "unknown tool"), id=request.get("id"))
-                busy.set()
-                threading.Thread(target=respond, args=(request,), daemon=True).start()
+                else:
+                    active_request.update(tool=request.get("params", {}).get("name", "unknown tool"), id=request.get("id"))
+                    busy.set()
+                    threading.Thread(target=respond, args=(request,), daemon=True).start()
         else:
             response = handle(request)
             if response is not None:

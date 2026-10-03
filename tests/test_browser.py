@@ -1101,6 +1101,7 @@ def test_surface_is_browser_and_android_only() -> None:
         "android_devices",
         "android_use",
         "android_read",
+        "android_facebook",
         "android_location",
     ]
     assert not any("computer_use" in n for n in names)

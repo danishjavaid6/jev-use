@@ -104,6 +104,15 @@ Hand off MFA/CAPTCHA/account restrictions or unsupported native dialogs. Never
 bypass creation guards with a manual click, probe hidden APIs, clear cookies, or
 perform a logout URL experiment. Batch known steps rather than narrate each click.
 
+If login stalls, report the runner's `loginObservation` and any tool warnings.
+Saved-account cards are not proof of live sessions; an absent identity cookie
+and unchanged page do not prove expired sessions or restrictions. A native-dialog
+connection warning means DOM inspection cannot rule out a browser-owned popup.
+Inspect the visible browser once (including browser chrome), or hand off that
+inspection when unavailable. Do not click behind a suspected native popup, test
+other accounts to generalize the failure, or describe untested accounts as blocked
+by a proven account-specific cause. Preserve the same run and checkpoints.
+
 ## Finish
 
 Call `browser_close` to save the GoLogin profile. Report each account's Page name,

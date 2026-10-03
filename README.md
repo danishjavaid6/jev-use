@@ -202,6 +202,21 @@ Facebook's account location; quote it only when `state=location`. Typing support
 ASCII and generated text requires a text model. Phone automation can run while
 the user works on the PC, but shares the phone's visible screen with manual use.
 
+For Facebook account batches, use `android_facebook(action="accounts")` to get
+observed names, then `android_facebook(action="location", account="EXACT_NAME")`
+sequentially for each account. The workflow navigates the observed Facebook
+account picker without a decision model, waits for switching, and verifies the
+Menu identity before and after each location read. It returns explicit blocked
+states for locks, connection failures, sign-in, and unsupported layouts. It
+does not edit location or publish posts. Quote locations only with
+`state=location` and `identity_verified=true`.
+
+`android_read(include_screenshot=true)` returns both tappable descriptions and
+the phone image for unfamiliar UI. Exact unique descriptions can be selected
+with `android_use(goal="tap EXACT_DESCRIPTION", act=true, max_steps=1,
+decompose=false, use_cache=false)`. Reload the MCP connection after updating so
+the new tool schemas and handlers are active.
+
 ## Missing MCP tools
 
 Use the built-in fallback instead of asking the model to write clients:

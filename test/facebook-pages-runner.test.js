@@ -110,6 +110,22 @@ test('a pending login is resumed without selecting the saved card again', async 
   const f=fixture(); f.record.loginCardClicked=true;
   await assert.rejects(f.runner.prepare(config), /identity did not become verifiable/);
   assert.ok(!f.events.some(event=>event[0]==='login'));
+  assert.equal(f.record.loginObservation.cardSelectionAttempted,true);
+  assert.equal(f.record.loginObservation.identityPresent,false);
+  assert.equal(f.record.loginObservation.savedCardVisible,true);
+  assert.equal(f.record.loginObservation.passwordPromptVisible,false);
+  assert.equal(f.record.loginObservation.passwordSubmissionAttempted,false);
+  assert.ok(!JSON.stringify(f.record).includes(config.password));
+});
+
+test('an inert saved card reports observations without inferring expired sessions or retrying', async () => {
+  const f=fixture();
+  f.setDelay(120000);
+  await assert.rejects(f.runner.login(config,f.record,1500), /within 1.5 seconds/);
+  assert.equal(f.events.filter(event=>event[0]==='login').length,1);
+  assert.equal(f.record.loginObservation.elapsedMs,1500);
+  assert.equal(f.record.loginObservation.identityPresent,false);
+  assert.equal(f.record.accountId,undefined);
 });
 
 test('identity verification requires the requested name on a link to the cookie identity', async () => {
