@@ -9,8 +9,21 @@ tool at a time. Await each result before starting the next call.
 
 ## Facebook account location jobs
 
-For checking one or every saved Facebook account, use the deterministic workflow
-instead of planning taps with `android_use`:
+For checking every saved Facebook account, use `android_facebook(action="audit")`
+when the live tool schema exposes it. Set `chunk_size=2` unless a smaller chunk
+is needed to fit the harness timeout. Keep calls sequential; when `complete=false`,
+pass the returned `resume_token` unchanged on the next audit call. Results are
+cumulative, so preserve prior verified entries. If an audit response contains
+a blocker, inspect the phone once and follow the returned detail. If a switch
+finished late or the phone is still logging in as the requested account, resume
+with the same token and `retry_current=true` (CLI: `--retry-current`). This waits
+for that login, verifies the active identity, and reads without selecting again;
+an identity mismatch stays blocked. After inspection, if that account must be
+skipped, pass the same token with
+`continue_after_blocker=true` (CLI: `--continue-after-blocker`) to skip that
+uncertain account and proceed with later accounts. The skipped account remains
+unverified; never replay its selection automatically. For one account, or while
+`audit` is unavailable, use the deterministic workflow below:
 
 1. `android_devices()` once, then keep its serial.
 2. `android_facebook(serial="...", action="accounts")` once. Use only returned
@@ -26,10 +39,12 @@ instead of planning taps with `android_use`:
 
 `locked`, `network_error`, `login`, and `authentication_required` require the stated user action. For
 `identity_mismatch`, `timeout`, `unsupported_ui`, or `account_ambiguous`, inspect
-once with `android_read(include_screenshot=true)`. Do not repeat a timed-out
-account selection or lower model confidence. The operation may have taken effect.
-Unknown layouts fail without guessing. A scrollable list is reported as incomplete,
-never as all saved accounts. Preserve already confirmed results on interruptions.
+once with `android_read(include_screenshot=true)`. Use the guarded audit recovery
+above for an observed delayed login; otherwise stop. Do not try a manual
+guessed-tap fallback, repeat a timed-out account selection, or lower model
+confidence. The operation may have taken effect. Unknown layouts fail without
+guessing. A partial list is never reported as complete. Preserve already confirmed
+results on interruptions and resume when a token is available.
 
 Primary location is Facebook's inferred value; these read tools do not set it.
 A request to update a profile city or make a location-tagged post is a separate
@@ -39,9 +54,12 @@ location” is ambiguous, clarify which UI action the user wants.
 
 The running MCP process must be reloaded after installing updated tools. If
 `android_facebook` is absent from the live tool catalog, use the built-in
-`jev-use call android_facebook --serial ... --action accounts`, then
-`jev-use call android_facebook --serial ... --action location --account "NAME"` with the
-same arguments; do not revert to a chain of model-guessed taps.
+`jev-use call android_facebook --serial SERIAL --action audit --chunk-size 2`
+fallback. Continue with `--resume-token TOKEN` from the returned response. Use
+`--continue-after-blocker` only after inspecting/resolving the blocker. The
+tool-call fields are `chunk_size`, `resume_token`, `retry_current`, and
+`continue_after_blocker`. The recovery and skip flags are mutually exclusive.
+Do not revert to model-guessed taps after an unsupported layout.
 
 ## Other phone tasks
 

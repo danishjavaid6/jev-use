@@ -1105,7 +1105,7 @@ def test_two_accounts_yield_their_own_locations(monkeypatch: pytest.MonkeyPatch)
             "Your primary location is near:\nCebu City, Central Visayas",
         ]
     )
-    monkeypatch.setattr(android, "open_facebook_page", lambda _s, url: opened.append(url))
+    monkeypatch.setattr(android, "open_facebook_page", lambda _s, url, **kwargs: opened.append(url))
     monkeypatch.setattr(android, "screen_text", lambda _s: next(pages))
 
     first = android.account_location("S")
@@ -1117,26 +1117,26 @@ def test_two_accounts_yield_their_own_locations(monkeypatch: pytest.MonkeyPatch)
     assert opened[0] != opened[1], "the second check must not ask for the first's URL"
 
 
-def test_a_sign_in_page_is_not_confused_with_an_unrendered_one(
+def test_zero_timeout_does_not_open_or_read_a_page(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Two different fixes: "not signed in" needs a login, "did not render" needs
     another attempt. Collapsing both into an empty answer hides which it is."""
-    monkeypatch.setattr(android, "open_facebook_page", lambda _s, url: None)
-    monkeypatch.setattr(android, "screen_text", lambda _s: SIGN_IN_PAGE)
+    monkeypatch.setattr(android, "open_facebook_page", lambda _s, url, **kwargs: None)
+    monkeypatch.setattr(android, "screen_text", lambda _s: pytest.fail("expired deadline must not read"))
 
     found = android.account_location("S", timeout=0.0)
 
     assert found.location == ""
-    assert found.state == "login"
-    assert "sign-in page" in found.describe()
+    assert found.state == "unknown"
+    assert "had not rendered" in found.describe()
 
 
 def test_a_page_that_never_renders_gives_up_at_the_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A blank webview must not hang the caller."""
-    monkeypatch.setattr(android, "open_facebook_page", lambda _s, url: None)
+    monkeypatch.setattr(android, "open_facebook_page", lambda _s, url, **kwargs: None)
     monkeypatch.setattr(android, "screen_text", lambda _s: "")
 
     found = android.account_location("S", timeout=0.0)
@@ -1149,7 +1149,7 @@ def test_a_page_that_never_renders_gives_up_at_the_timeout(
 @pytest.mark.parametrize('text,state', [('Connection lost\nTap to retry\nWebpage not available', 'network_error'),
                                        ('Unlock\nUse fingerprint to unlock\nCharging 7%', 'locked')])
 def test_location_blockers_return_immediately_instead_of_waiting_full_timeout(monkeypatch, text, state):
-    monkeypatch.setattr(android, 'open_facebook_page', lambda serial, url: None)
+    monkeypatch.setattr(android, 'open_facebook_page', lambda serial, url, **kwargs: None)
     monkeypatch.setattr(android, 'screen_text', lambda serial: text)
     monkeypatch.setattr(android.time, 'sleep', lambda seconds: pytest.fail('known blocker must not keep polling'))
     found = android.account_location('S', timeout=30)
@@ -1170,3 +1170,87 @@ def test_the_location_tool_defaults_are_single_sourced() -> None:
         == android.LOCATION_LOAD_TIMEOUT
     )
     assert "android_location" in mcp_server.HANDLERS
+
+
+def test_blank_webview_gets_one_bounded_read_only_recovery(monkeypatch):
+    class Clock:
+        now = 0.0
+
+        def monotonic(self):
+            return self.now
+
+        def sleep(self, seconds):
+            self.now += seconds
+
+    clock = Clock()
+    opens, reads, backs = [], [], []
+    monkeypatch.setattr(android.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(android.time, "sleep", clock.sleep)
+    monkeypatch.setattr(android, "open_facebook_page", lambda serial, url, **kwargs: opens.append(url))
+    monkeypatch.setattr(android, "key", lambda serial, code: backs.append(code))
+    monkeypatch.setattr(android, "screen_text", lambda serial: reads.append(1) or (
+        "Your primary location is near:\nLahore, Punjab 54" if len(reads) >= 4 else ""))
+    webview = android.Observation("S", android.parse_nodes(
+        '<hierarchy><node class="android.webkit.WebView" package="com.facebook.katana" '
+        'bounds="[0,0][1080,2160]" /></hierarchy>'), (1080, 2160), "com.facebook.katana/.WebView")
+    monkeypatch.setattr(android, "snapshot", lambda serial: webview)
+
+    found = android.account_location("S", timeout=8, poll=1)
+
+    assert found.state == "location"
+    assert found.location == "Lahore, Punjab 54"
+    assert found.retries == 1
+    assert len(opens) == 2
+    assert backs == [android.KEYCODES["go_back"]]
+    assert found.timings["recovery"] >= 0
+
+
+def test_blank_non_webview_does_not_trigger_navigation_recovery(monkeypatch):
+    class Clock:
+        now = 0.0
+
+        def monotonic(self):
+            return self.now
+
+        def sleep(self, seconds):
+            self.now += seconds
+
+    clock = Clock()
+    opens, backs = [], []
+    monkeypatch.setattr(android.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(android.time, "sleep", clock.sleep)
+    monkeypatch.setattr(android, "open_facebook_page", lambda serial, url, **kwargs: opens.append(url))
+    monkeypatch.setattr(android, "key", lambda serial, code: backs.append(code))
+    monkeypatch.setattr(android, "screen_text", lambda serial: "")
+    monkeypatch.setattr(android, "snapshot", lambda serial: android.Observation(
+        "S", [], (1080, 2160), "com.android.launcher/.Home"))
+
+    found = android.account_location("S", timeout=3, poll=1)
+
+    assert found.state == "unknown"
+    assert found.retries == 0
+    assert len(opens) == 1
+    assert backs == []
+
+
+def test_slow_recovery_inspection_does_not_act_after_deadline(monkeypatch):
+    now = [0.0]
+    opens = []
+    monkeypatch.setattr(android.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(android, "open_facebook_page", lambda serial, url, **kwargs: opens.append(url))
+
+    def blank_read(serial):
+        now[0] += 2
+        return ""
+
+    def slow_inspection(serial):
+        now[0] += 5
+        return android.Observation("S", [], (1080, 2160), "com.facebook.katana/.WebView")
+
+    monkeypatch.setattr(android, "screen_text", blank_read)
+    monkeypatch.setattr(android, "snapshot", slow_inspection)
+    monkeypatch.setattr(android, "key", lambda *args: pytest.fail("deadline expired during inspection"))
+    found = android.account_location("S", timeout=5, poll=0)
+    assert found.state == "unknown"
+    assert found.retries == 0
+    assert len(opens) == 1

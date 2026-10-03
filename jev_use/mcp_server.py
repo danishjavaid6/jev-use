@@ -64,6 +64,7 @@ from .text_model import TextModel
 
 from . import android as android_engine
 from . import facebook_android
+from . import facebook_audit
 from . import gologin
 from . import harness
 from . import betterwright
@@ -321,10 +322,16 @@ MOBILE_PROMPT_NAME = "mobile-use"
 
 MOBILE_PROMPT_TEMPLATE = """Task: {task}
 Call android_devices once; run phone calls sequentially and reuse its serial.
-For Facebook account locations, use android_facebook(action="accounts") once,
-then android_facebook(action="location", account="EXACT_RETURNED_NAME") per account.
-This handles account selection, login waits, and identity verification without
-model-guessed taps. Quote location only when state=location and identity_verified=true.
+For a full Facebook location audit, use android_facebook(action="audit") in
+bounded chunks. Save and pass its resume_token until complete=true. The audit
+enumerates observed names and processes them sequentially, persisting each
+finished outcome. On blocked, inspect the phone before choosing retry_current=true
+(checks the active account without selecting it) or continue_after_blocker=true
+(skips it). These options are exclusive; uncertain accounts are never selected
+twice. A partial final report retains failed account outcomes.
+Quote location only when state=location and identity_verified=true.
+For one account use android_facebook(action="location", account="EXACT_RETURNED_NAME").
+Both paths handle account selection and identity verification without model-guessed taps.
 For locked/network_error/login/authentication_required, report the required user
 action. For timeout/unsupported_ui/identity_mismatch, inspect once with
 android_read(include_screenshot=true); never repeat an uncertain account switch.
@@ -713,15 +720,24 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "android_facebook",
-        "description": "Deterministic Facebook account workflow; no decision model needed. Call action=accounts once, then action=location with each exact returned account name. Selects once, waits for login, verifies account before/after reading, and reports locked/network/login/unsupported UI explicitly. Sequential calls only. Reads primary location; does not edit it or publish posts.",
+        "description": "Deterministic Facebook account workflow; no decision model needed. Prefer action=audit in timeout-safe chunks and pass its resume_token until complete. It enumerates exact observed names, persists each verified result and processes accounts sequentially. Use accounts/location for a single manual read. Reads primary location; does not edit it or publish posts.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "serial": {"type": "string", "description": "Device from android_devices."},
-                "action": {"type": "string", "enum": ["accounts", "location"]},
+                "action": {"type": "string", "enum": ["accounts", "location", "audit"]},
                 "account": {"type": "string", "description": "Exact observed account name; required for action=location."},
-                "timeout": {"type": "number", "default": ANDROID_LOCATION_TIMEOUT, "minimum": 1, "maximum": 60,
-                            "description": "Seconds per login/page transition; a timed-out switch is not repeated."},
+                "timeout": {"type": "number", "default": facebook_audit.DEFAULT_ACCOUNT_TIMEOUT, "minimum": 1, "maximum": 60,
+                            "description": "Maximum total seconds for each account selection and location read."},
+                "chunk_size": {"type": "integer", "default": facebook_audit.DEFAULT_CHUNK_SIZE, "minimum": 1, "maximum": facebook_audit.MAX_CHUNK_SIZE,
+                               "description": "Maximum sequential accounts to process in this timeout-safe call."},
+                "chunk_budget_seconds": {"type": "number", "default": facebook_audit.CHUNK_BUDGET_SECONDS, "minimum": 10, "maximum": 55,
+                                         "description": "Maximum wall time for this audit call, including enumeration."},
+                "resume_token": {"type": "string", "description": "Opaque token returned by an earlier incomplete audit."},
+                "continue_after_blocker": {"type": "boolean", "default": False,
+                                            "description": "After inspecting and resolving the phone state, skip any uncertain in-flight account and continue with later accounts."},
+                "retry_current": {"type": "boolean", "default": False,
+                                  "description": "After inspecting the phone, recheck the already-active account without selecting it again. Requires resume_token and a blocked audit."},
             },
             "required": ["action"],
         },
@@ -1225,13 +1241,49 @@ def tool_android_read(args: dict[str, Any]) -> str | list[dict[str, Any]]:
 
 
 def tool_android_facebook(args: dict[str, Any]) -> str:
-    timeout = _bounded_number(args, "timeout", ANDROID_LOCATION_TIMEOUT, 1, 60)
     action = args.get("action")
-    if action not in ("accounts", "location"):
-        raise ValueError("action must be accounts or location")
+    if action not in ("accounts", "location", "audit"):
+        raise ValueError("action must be accounts, location, or audit")
+    if action == "audit":
+        for name in ("timeout", "chunk_budget_seconds"):
+            if name in args and (isinstance(args[name], bool) or not isinstance(args[name], (int, float))):
+                raise ValueError(f"{name} must be a number")
+    timeout = _bounded_number(args, "timeout", facebook_audit.DEFAULT_ACCOUNT_TIMEOUT if action == "audit" else ANDROID_LOCATION_TIMEOUT, 1, 60)
     account = args.get("account")
     if action == "location" and (not isinstance(account, str) or not account.strip()):
         raise ValueError("account is required for action=location; use action=accounts first")
+    if action == "audit":
+        chunk_size = args.get("chunk_size", facebook_audit.DEFAULT_CHUNK_SIZE)
+        if isinstance(chunk_size, bool) or not isinstance(chunk_size, int):
+            raise ValueError("chunk_size must be an integer")
+        if not 1 <= chunk_size <= facebook_audit.MAX_CHUNK_SIZE:
+            raise ValueError(f"chunk_size must be between 1 and {facebook_audit.MAX_CHUNK_SIZE}")
+        resume_token = args.get("resume_token")
+        if resume_token is not None and not isinstance(resume_token, str):
+            raise ValueError("resume_token must be a string")
+        if resume_token is not None:
+            facebook_audit.validate_resume_token_format(resume_token)
+            facebook_audit.validate_resume_token(resume_token)
+        continue_after_blocker = args.get("continue_after_blocker", False)
+        if not isinstance(continue_after_blocker, bool):
+            raise ValueError("continue_after_blocker must be a boolean")
+        retry_current = args.get("retry_current", False)
+        if not isinstance(retry_current, bool):
+            raise ValueError("retry_current must be a boolean")
+        if continue_after_blocker and retry_current:
+            raise ValueError("continue_after_blocker and retry_current are mutually exclusive")
+        if retry_current and resume_token is None:
+            raise ValueError("retry_current requires a resume_token")
+        chunk_budget = _bounded_number(args, "chunk_budget_seconds", facebook_audit.CHUNK_BUDGET_SECONDS, 10, 55)
+        if timeout > chunk_budget:
+            raise ValueError("timeout must not exceed chunk_budget_seconds")
+        device = android_device(args)
+        result = facebook_audit.run(device.serial, timeout=timeout, chunk_size=chunk_size,
+                                    resume_token=resume_token, facebook_run=facebook_android.run,
+                                    chunk_budget_seconds=chunk_budget,
+                                    continue_after_blocker=continue_after_blocker,
+                                    retry_current=retry_current)
+        return json.dumps(result, ensure_ascii=False)
     device = android_device(args)
     return json.dumps(facebook_android.run(device.serial, action=action, account=account, timeout=timeout), ensure_ascii=False)
 

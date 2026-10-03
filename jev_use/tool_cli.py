@@ -9,12 +9,16 @@ from . import mcp_server
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("tool", choices=list(mcp_server.HANDLERS))
-    for name in ("profile", "url", "goal", "serial", "vendor", "action", "account", "label", "text", "code"):
+    for name in ("profile", "url", "goal", "serial", "vendor", "action", "account", "label", "text", "code", "resume-token"):
         parser.add_argument("--" + name)
     parser.add_argument("--port", type=int)
     parser.add_argument("--timeout", type=float)
+    parser.add_argument("--chunk-size", type=int)
+    parser.add_argument("--chunk-budget-seconds", type=float)
     parser.add_argument("--include-screenshot", action="store_true", default=None)
     parser.add_argument("--act", action="store_true", default=None)
+    parser.add_argument("--continue-after-blocker", action="store_true", default=None)
+    parser.add_argument("--retry-current", action="store_true", default=None)
     parser.add_argument("--headless", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--json-file", help="Advanced arguments as JSON in a file; avoids shell quoting.")
     options = vars(parser.parse_args())

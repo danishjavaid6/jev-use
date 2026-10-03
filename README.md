@@ -202,14 +202,42 @@ Facebook's account location; quote it only when `state=location`. Typing support
 ASCII and generated text requires a text model. Phone automation can run while
 the user works on the PC, but shares the phone's visible screen with manual use.
 
-For Facebook account batches, use `android_facebook(action="accounts")` to get
-observed names, then `android_facebook(action="location", account="EXACT_NAME")`
-sequentially for each account. The workflow navigates the observed Facebook
-account picker without a decision model, waits for switching, and verifies the
-Menu identity before and after each location read. It returns explicit blocked
-states for locks, connection failures, sign-in, and unsupported layouts. It
-does not edit location or publish posts. Quote locations only with
-`state=location` and `identity_verified=true`.
+For Facebook account batches, use `android_facebook(action="audit")`. It
+enumerates saved accounts and processes them sequentially in bounded chunks.
+Continue with the returned resume token while `complete=false`; keep each call
+sequential. If a blocker stops the audit, inspect the phone and follow its
+detail. For an observed delayed login, pass the same token with
+`retry_current=true` (CLI: `--retry-current`). Recovery verifies the currently
+active account and reads its location without selecting the saved account again.
+Use `continue_after_blocker=true` (CLI: `--continue-after-blocker`) instead if
+the inspected account must be skipped. The two flags are mutually exclusive.
+The skipped account remains unverified.
+Each result includes the account, location, identity verification, state, and
+elapsed time. Quote a location only when `state=location` and
+`identity_verified=true`. The workflow returns explicit blocked states for
+locks, connection failures, sign-in, and unsupported layouts. It does not edit
+location or publish posts. For a single account, `action="location"` remains
+available.
+
+To summarize captured audit calls, save one JSON object per line in a JSONL
+file. Each line can be the tool response directly or a JSON object with the
+response under `response` and optional `wall_seconds`, `tool_calls`, and
+`model_calls` numbers from the harness. Then run:
+
+```text
+python scripts/benchmark_facebook_audit.py audit-responses.jsonl
+```
+
+The report counts unique verified accounts, reported location retries, per-account
+elapsed time, audit call time, and known wall time. Audit responses include
+cumulative results, so the script counts each account once. Enumeration time is
+shown separately because it is already included in the first audit call. Record
+wall time around each tool call to
+make it useful. It leaves model/provider latency unknown when the harness does
+not report it; the wall-minus-call figure is unattributed time, not an inference
+measurement. Compare a live complete run with the 43m20s historical session
+only after reporting verified completion count. The 5x improvement in the plan
+is an engineering target, not a measured result.
 
 `android_read(include_screenshot=true)` returns both tappable descriptions and
 the phone image for unfamiliar UI. Exact unique descriptions can be selected

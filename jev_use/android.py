@@ -778,6 +778,20 @@ def scroll(serial: str, screen: tuple[int, int], direction: str) -> None:
         swipe(serial, cx, upper, cx, min(lower, upper + distance))
 
 
+def scroll_region(serial: str, bounds: tuple[int, int, int, int], direction: str) -> None:
+    """Scroll a verified container without swiping over neighboring controls."""
+    left, top, right, bottom = bounds
+    if right <= left or bottom <= top or direction not in ("scroll_down", "scroll_up"):
+        raise ValueError("invalid scroll region or direction")
+    cx = (left + right) // 2
+    upper = top + int((bottom - top) * .2)
+    lower = bottom - int((bottom - top) * .2)
+    if direction == "scroll_down":
+        swipe(serial, cx, lower, cx, upper)
+    else:
+        swipe(serial, cx, upper, cx, lower)
+
+
 def is_ascii(text: str) -> bool:
     return all(ord(ch) < 128 for ch in text)
 
@@ -885,14 +899,15 @@ def cache_busted(url: str, *, stamp: int | float | None = None) -> str:
     return f"{url}{separator}_jev={int(stamp if stamp is not None else time.time_ns())}"
 
 
-def open_facebook_page(serial: str, url: str) -> None:
+def open_facebook_page(serial: str, url: str, *, timeout: float = ADB_TIMEOUT) -> None:
     """Open a page in the Facebook app's webview through its own deep link.
 
     `am start` reports a route it could not resolve on stdout with an `Error:`
     prefix and still exits 0, so the output is inspected rather than trusted.
     """
     link = webview_link(url)
-    out = shell(serial, f"am start -a android.intent.action.VIEW -d {shell_quote(link)}")
+    out = shell(serial, f"am start -a android.intent.action.VIEW -d {shell_quote(link)}",
+                timeout=max(.1, timeout))
     if "Error:" in out:
         detail = out.strip().splitlines()[-1][:300]
         raise AdbError(
@@ -967,6 +982,8 @@ class AccountLocation:
     state: str = "unknown"
     seconds: float = 0.0
     text: str = ""
+    timings: dict[str, float] = field(default_factory=dict)
+    retries: int = 0
 
     def describe(self) -> str:
         lines = [
@@ -1012,20 +1029,56 @@ def account_location(
     the device location — so accounts sharing a phone and a network can still
     agree unless their profile cities or activity differ.
     """
-    started = time.perf_counter()
+    started = time.monotonic()
     target = cache_busted(url)
-    open_facebook_page(serial, target)
+    timings = {"open": 0.0, "hierarchy_reads": 0.0, "recovery": 0.0}
+    deadline = started + max(0.0, timeout)
+    if time.monotonic() >= deadline:
+        return AccountLocation(serial, target, state="unknown", seconds=0.0,
+                               timings={"open": 0.0, "hierarchy_reads": 0.0, "recovery": 0.0})
+    open_started = time.monotonic()
+    open_facebook_page(serial, target, timeout=max(.1, deadline - time.monotonic()))
+    timings["open"] += time.monotonic() - open_started
 
-    deadline = time.perf_counter() + max(0.0, timeout)
     text = ""
+    retries = 0
+    recovery_checked = False
+    recovery_at = started + min(4.0, max(1.0, timeout * .2))
     while True:
+        read_started = time.monotonic()
         text = screen_text(serial)
+        timings["hierarchy_reads"] += time.monotonic() - read_started
         location = parse_primary_location(text)
         if location or location_screen_state(text):
             break
-        if time.perf_counter() >= deadline:
+        now = time.monotonic()
+        # A blank page may be a missed webview navigation. Allow one bounded,
+        # read-only re-open after a short observation window, within the same
+        # per-account deadline. Never repeat account selection or attribution.
+        if retries == 0 and not recovery_checked and now >= recovery_at and now < deadline:
+            recovery_checked = True
+            evidence = snapshot(serial)
+            if time.monotonic() >= deadline:
+                break
+            webview_visible = any("WebView" in node.cls for node in evidence.nodes)
+            page_context = "primary location" in evidence.read().casefold()
+            if not evidence.foreground.startswith(FACEBOOK_APP + "/") or not (webview_visible or page_context):
+                if now >= deadline:
+                    break
+                time.sleep(min(max(0.0, poll), max(0.0, deadline - time.monotonic())))
+                continue
+            recovery_started = time.monotonic()
+            key(serial, KEYCODES["go_back"])
+            if time.monotonic() >= deadline:
+                break
+            target = cache_busted(url)
+            open_facebook_page(serial, target, timeout=max(.1, deadline - time.monotonic()))
+            timings["recovery"] += time.monotonic() - recovery_started
+            retries = 1
+            continue
+        if now >= deadline:
             break
-        time.sleep(max(0.0, poll))
+        time.sleep(min(max(0.0, poll), max(0.0, deadline - now)))
 
     location = parse_primary_location(text) or ""
     state = "location" if location else location_screen_state(text) or "unknown"
@@ -1034,8 +1087,10 @@ def account_location(
         url=target,
         location=location,
         state=state,
-        seconds=time.perf_counter() - started,
+        seconds=time.monotonic() - started,
         text=text,
+        timings=timings,
+        retries=retries,
     )
 
 
