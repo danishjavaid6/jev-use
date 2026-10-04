@@ -27,7 +27,8 @@ No live mutation is authorized merely by loading this skill.
 Use the complete profile list returned by `browser_profiles`; it handles API
 pagination. Do not search local GoLogin metadata or guess IDs to replace that
 list. When the user says “all GoLogin profiles”, select every exact profile ID
-returned by that call without asking a profile-scope question. When the user
+returned by that call without asking a profile-scope question, sorted numerically
+so `Profile 1` is always processed first. When the user
 supplies an ordered password list without an account mapping, assign password
 index `n` to saved-account card index `n` within each profile. Do not cycle or
 reuse a password after the list ends: mark extra accounts `missing_password`,
