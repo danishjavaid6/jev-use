@@ -32,7 +32,7 @@ function fixture({ withDialogs = false } = {}) {
     workflow: {
       begin: () => record,
       navigate: async url => events.push(['goto',url]),
-      browseFeed: async options => { assert.equal(options.seconds,30); record.browsed=true; events.push(['browse']); },
+      browseFeed: async options => { assert.equal(options.seconds,120); record.browsed=true; events.push(['browse']); },
       fillPage: async () => events.push(['fill']),
       beforeCreate: name => { record.pageName=name; record.stage='submission_reserved'; events.push(['reserve']); return record; },
       validateCreation: async () => events.push(['validate']),
@@ -54,7 +54,7 @@ test('prepares then confirms and logs out without retaining the password', async
   assert.ok(!JSON.stringify(f.record).includes('never-return-this'));
   f.record.stage='submitting'; // Bridge journals and performs the one creation click.
   assert.equal((await f.runner.finish(config)).stage,'logged_out');
-  assert.deepEqual(f.events.slice(-2).map(event=>event[0]),['confirm','logout']);
+  assert.deepEqual(f.events.slice(-3).map(event=>event[0]),['confirm','goto','logout']);
 });
 
 test('an existing reservation validates without logging in, browsing or creating again', async () => {

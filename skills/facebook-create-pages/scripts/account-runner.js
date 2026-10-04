@@ -5,9 +5,9 @@ const facebookPages = {
     for (const key of ['run_id', 'account', 'page_name']) {
       if (typeof options[key] !== 'string' || !options[key].trim()) throw new Error(`${key} must be a non-empty string`);
     }
-    const browseSeconds = options.browse_seconds ?? 30;
+    const browseSeconds = options.browse_seconds ?? 120;
     const settleMs = options.post_fill_delay_ms ?? 0;
-    const successBrowseSeconds = options.post_success_browse_seconds ?? 0;
+    const successBrowseSeconds = options.post_success_browse_seconds ?? 30;
     if (!Number.isInteger(browseSeconds) || browseSeconds < 30 || browseSeconds > 180) throw new Error('browse_seconds must be an integer from 30 to 180');
     if (!Number.isInteger(settleMs) || settleMs < 0 || settleMs > 180000) throw new Error('post_fill_delay_ms must be an integer from 0 to 180000');
     if (!Number.isInteger(successBrowseSeconds) || successBrowseSeconds < 0 || successBrowseSeconds > 60) throw new Error('post_success_browse_seconds must be an integer from 0 to 60');
@@ -145,7 +145,7 @@ const facebookPages = {
       if (checkpoint.stage === 'mfa_required') return checkpoint;
     }
     await workflow.dismissPagePrompts?.();
-    await this.measure(checkpoint, 'browsingMs', () => workflow.browseFeed({ seconds: config.browse_seconds ?? 30, discoverVideoSurface: true }));
+    await this.measure(checkpoint, 'browsingMs', () => workflow.browseFeed({ seconds: config.browse_seconds ?? 120, discoverVideoSurface: true }));
     if (!checkpoint.browsed) throw new Error('Feed browsing completed without observed video playback; inspect Videos/Reels once before continuing');
     if (!page.url().startsWith('https://www.facebook.com/pages/create')) await this.measure(checkpoint, 'formNavigationMs', () => workflow.navigate('https://www.facebook.com/pages/create/'));
     await this.measure(checkpoint, 'formFillMs', () => workflow.fillPage({
@@ -178,7 +178,7 @@ const facebookPages = {
       await this.measure(checkpoint, 'confirmationMs', () => workflow.confirmCreated(config.confirmation || {}));
     }
     if (checkpoint.stage !== 'created') throw new Error(`Cannot finish stage ${checkpoint.stage}; prepare or inspect without another creation click`);
-    await this.measure(checkpoint, 'postCreateBrowsingMs', () => this.browseAfterCreation(checkpoint, config.post_success_browse_seconds ?? 0));
+    await this.measure(checkpoint, 'postCreateBrowsingMs', () => this.browseAfterCreation(checkpoint, config.post_success_browse_seconds ?? 30));
     return this.measure(checkpoint, 'logoutMs', () => workflow.logout(config.logout || {}));
   }
 };
