@@ -92,7 +92,8 @@ password/remembered login to finish. It scrolls/plays the feed for 30 seconds
 (tries an observed Reels/Videos link once if the home feed has no playback),
 fills the Page form, waits through the configured post-fill settling delay,
 verifies it is ready, and saves `submission_reserved` without creating the Page. The
-bundled runner defaults to a 90-second browse and a 90-second post-fill delay;
+bundled runner defaults to a 90-second browse, a 15-second post-fill delay, and
+a 30-second home-feed scroll after creation confirmation;
 override `browse_seconds` and `post_fill_delay_ms` deliberately when needed. If the user
 changes the browsing requirement, adapt that step deliberately rather than
 claiming it occurred. No observed playback means pause for one focused inspection.
