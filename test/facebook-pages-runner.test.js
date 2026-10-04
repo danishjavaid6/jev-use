@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const source = fs.readFileSync(path.join(__dirname, '../skills/facebook-create-pages/scripts/account-runner.js'), 'utf8');
 const config = { run_id:'run1', account:'Saved account', page_name:'Test Page', password:'fixture-only' };
-function fixture() {
+function fixture({ withDialogs = false } = {}) {
   const events = [];
   const record = {stage:'started'};
   let identity = null;
@@ -16,6 +16,7 @@ function fixture() {
   let clickedAt = null;
   const sandbox = {
     Date: {now: () => now},
+    ...(withDialogs ? { dialogs: { acceptNext: async () => events.push(['accept-dialog']) } } : {}),
     page: {
       url: () => 'https://www.facebook.com/',
       evaluate: async (callback, name) => {
@@ -97,6 +98,13 @@ test('slow remembered login waits for identity without repeated clicks or reload
   await f.runner.prepare(config);
   assert.equal(f.events.filter(event=>event[0]==='login').length,1);
   assert.equal(f.record.accountId,'account-123');
+});
+
+test('arms native dialog handling before saved-card selection', async () => {
+  const f = fixture({ withDialogs: true });
+  f.setDelay(500);
+  await f.runner.prepare(config);
+  assert.deepEqual(f.events.slice(0, 2).map(event => event[0]), ['accept-dialog', 'login']);
 });
 
 test('wrong or unverified existing identity never reaches browsing or creation', async () => {

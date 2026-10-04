@@ -30,6 +30,15 @@ const facebookPages = {
     const input = page.locator('input[name="pass"]').first();
     const card = config.account_selector ? page.locator(config.account_selector)
       : page.getByRole('button').filter({ hasText: accountName });
+    // Facebook can raise a page-owned alert while selecting a saved account or
+    // submitting its password. Arm the browser dialog handler immediately
+    // before each action so the alert cannot wedge the CDP session. Keep this
+    // optional for older runners and unit fixtures without a dialogs helper.
+    const acceptNextDialog = async () => {
+      if (typeof dialogs !== 'undefined' && dialogs && typeof dialogs.acceptNext === 'function') {
+        await dialogs.acceptNext();
+      }
+    };
     while (Date.now() < deadline) {
       const identity = await page.evaluate(expectedName => {
         if (!/(^|\.)facebook\.com$/.test(location.hostname)) return null;
@@ -56,9 +65,11 @@ const facebookPages = {
         if (!config.password) throw new Error('Password prompt appeared but no task password was supplied');
         await input.fill(config.password);
         checkpoint.loginSubmitted = true;
+        await acceptNextDialog();
         await input.press('Enter');
       } else if (!identity && !checkpoint.loginCardClicked && await card.isVisible().catch(() => false)) {
         checkpoint.loginCardClicked = true;
+        await acceptNextDialog();
         await card.click();
       }
       await page.waitForTimeout(500); // Bounded polling for hydration/identity, not a reload loop.
