@@ -130,8 +130,13 @@ def run(serial: str, *, timeout: float, chunk_size: int,
         raise ValueError("timeout must be a number from 1 to 60 seconds")
     if isinstance(chunk_budget_seconds, bool) or not isinstance(chunk_budget_seconds, (int, float)) or not 10 <= chunk_budget_seconds <= 55:
         raise ValueError("chunk_budget_seconds must be a number from 10 to 55 seconds")
-    if timeout > chunk_budget_seconds:
-        raise ValueError("timeout must not exceed chunk_budget_seconds")
+    # Enumeration runs inside the same call budget as account processing.  If
+    # the two limits are equal, even a few milliseconds spent entering the
+    # workflow leave less than one full account timeout and the loop can return
+    # an in-progress checkpoint forever without processing an account.  Require
+    # explicit headroom so callers get an actionable error instead.
+    if timeout >= chunk_budget_seconds:
+        raise ValueError("chunk_budget_seconds must be greater than timeout (leave headroom for enumeration)")
     if not isinstance(continue_after_blocker, bool):
         raise ValueError("continue_after_blocker must be a boolean")
     if not isinstance(retry_current, bool):

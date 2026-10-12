@@ -74,6 +74,17 @@ Use the same config and checkpoint scope in both calls. `account` is a stable
 account identifier or the observed saved-account name; `account_name` is needed
 only when those differ. The runner checks the active identity on resumption.
 
+For an already verified Facebook ID, the runner also exposes a read-only
+primary-location check. Pass the ID observed in the `c_user` identity cookie;
+the method refuses to return a location if Facebook switches accounts:
+
+```js
+return await facebookPages.primaryLocation({account_id: "<verified Facebook ID>"});
+```
+
+The result is `state: "location"` with `location` only when Facebook's page
+names a value. `login` and `unknown` are reported without guessing.
+
 First call: `browser_script(port=N, timeout=240, code=...)`:
 
 ```js
@@ -133,6 +144,27 @@ and reuse the same workflow. A profile is complete only when every observed
 account is terminal (`logged_out` or `mfa_required`) or the chooser is verified
 empty.
 
+### Batch todo file
+
+The loop above is long enough to lose your place on a restart. Track it in
+`runs/facebook-batch-todo.json` (local-only, gitignored) with the helper at
+[scripts/batch-todo.js](scripts/batch-todo.js). It stores profile/account
+statuses only — never passwords. `missing_password` and `mfa_required` are the
+only allowed skip reasons.
+
+```text
+node skills/facebook-create-pages/scripts/batch-todo.js init --file runs/facebook-batch-todo.json --batch B1 --profiles config/gologin-profiles.json
+node skills/facebook-create-pages/scripts/batch-todo.js add-accounts --file runs/facebook-batch-todo.json --profile-id <id> --accounts '[{"account":"Name","page_name":"Page"}]'
+node skills/facebook-create-pages/scripts/batch-todo.js next --file runs/facebook-batch-todo.json
+node skills/facebook-create-pages/scripts/batch-todo.js mark --file runs/facebook-batch-todo.json --profile-id <id> --account Name --status logged_out
+node skills/facebook-create-pages/scripts/batch-todo.js status --file runs/facebook-batch-todo.json
+```
+
+Protocol: init once per batch, add-accounts when a profile's cards are
+enumerated, next before starting work, mark after each account reaches a
+terminal stage (`logged_out`, or `skipped` with `missing_password` /
+`mfa_required`). A profile is done only when the todo file says so.
+
 ## Resume and unexpected UI
 
 - `logged_out`: account complete; do not create again.
@@ -190,12 +222,3 @@ The checked-in snapshot at `config/gologin-profiles.json` records the current
 exact ID from the live `browser_profiles` response when opening a profile; use the
 registry as a readable reference and detect/report any live changes instead of
 falling back to a name when duplicate names exist.
-
-The checked-in `config/facebook-account-registry.json` records the supplied
-profile/account ID and name inventory in Profile 1-to-29 order. Each account's
-`password_ref` is a non-secret slot such as `password_2`; the corresponding
-password must be supplied at runtime and must never be copied into this file.
-Use the exact profile/account ID and its mapped password slot directly. Do not
-try other password slots, rotate credentials, or retry a known account with a
-different password. If the runtime secret for a mapped slot is unavailable,
-record `missing_password` and continue.

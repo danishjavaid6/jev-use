@@ -61,6 +61,13 @@ test('prepares then confirms and logs out without retaining the password', async
   assert.equal(f.record.postCreateBrowsing.seconds, 60);
 });
 
+test('parses the primary location across Facebook text-layout variants', () => {
+  const f = fixture();
+  assert.equal(f.runner.parsePrimaryLocation('Your primary location is near:\nLahore, Punjab 54\nPrimary location is determined by information we use'), 'Lahore, Punjab 54');
+  assert.equal(f.runner.parsePrimaryLocation('Your primary location is near: Cebu City, Central Visayas'), 'Cebu City, Central Visayas');
+  assert.equal(f.runner.parsePrimaryLocation('Your primary location is near:\nLoading…'), null);
+});
+
 test('rejects timing overrides shorter than the required dwell periods', () => {
   const f = fixture();
   assert.throws(() => f.runner.config({...config, browse_seconds: 179}), /browse_seconds/);

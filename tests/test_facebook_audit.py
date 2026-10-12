@@ -237,6 +237,13 @@ def test_chunk_budget_does_not_start_an_account_without_its_full_timeout(tmp_pat
     assert result["timings"]["processed_this_call"] == 1
 
 
+def test_equal_chunk_budget_is_rejected_before_creating_a_stuck_checkpoint(tmp_path, monkeypatch):
+    monkeypatch.setattr(facebook_audit.host, "work_root", lambda: tmp_path)
+    with pytest.raises(ValueError, match="greater than timeout"):
+        facebook_audit.run("S", timeout=55, chunk_size=1, chunk_budget_seconds=55,
+                           resume_token=None, facebook_run=lambda *args, **kwargs: pytest.fail("must not start"))
+
+
 def test_preselection_session_blocker_does_not_consume_account_and_preflight_is_read_only(tmp_path, monkeypatch):
     monkeypatch.setattr(facebook_audit.host, "work_root", lambda: tmp_path)
     ready_states = [{"state": "pending_login", "pending_account": "Alpha",

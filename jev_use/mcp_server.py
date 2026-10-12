@@ -766,7 +766,7 @@ TOOLS: list[dict[str, Any]] = [
                 "chunk_size": {"type": "integer", "default": facebook_audit.DEFAULT_CHUNK_SIZE, "minimum": 1, "maximum": facebook_audit.MAX_CHUNK_SIZE,
                                "description": "Maximum sequential accounts to process in this timeout-safe call."},
                 "chunk_budget_seconds": {"type": "number", "default": facebook_audit.CHUNK_BUDGET_SECONDS, "minimum": 10, "maximum": 55,
-                                         "description": "Maximum wall time for this audit call, including enumeration."},
+                                         "description": "Maximum wall time for this audit call, including enumeration; must be greater than timeout to leave headroom for enumeration."},
                 "resume_token": {"type": "string", "description": "Opaque token returned by an earlier incomplete audit."},
                 "continue_after_blocker": {"type": "boolean", "default": False,
                                             "description": "After inspecting and resolving the phone state, skip any uncertain in-flight account and continue with later accounts."},
@@ -1337,8 +1337,8 @@ def tool_android_facebook(args: dict[str, Any]) -> str:
         if retry_current and resume_token is None:
             raise ValueError("retry_current requires a resume_token")
         chunk_budget = _bounded_number(args, "chunk_budget_seconds", facebook_audit.CHUNK_BUDGET_SECONDS, 10, 55)
-        if timeout > chunk_budget:
-            raise ValueError("timeout must not exceed chunk_budget_seconds")
+        if timeout >= chunk_budget:
+            raise ValueError("chunk_budget_seconds must be greater than timeout (leave headroom for enumeration)")
         device = android_device(args)
         result = facebook_audit.run(device.serial, timeout=timeout, chunk_size=chunk_size,
                                     resume_token=resume_token, facebook_run=facebook_android.run,

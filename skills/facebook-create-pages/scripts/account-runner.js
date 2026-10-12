@@ -28,6 +28,50 @@ const facebookPages = {
       return document.cookie.split(';').map(item => item.trim()).find(item => item.startsWith('c_user='))?.slice(7) || null;
     });
   },
+  parsePrimaryLocation(text) {
+    // Facebook has changed the markup around this page several times. Read the
+    // rendered text and anchor on the stable heading instead of a CSS selector.
+    const normalized = String(text || '').replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim();
+    const match = normalized.match(/your\s+primary\s+location\s+is\s+near\s*:?\s*(.*?)(?=\s+primary\s+location\s+is\s+determined\b|$)/i);
+    if (!match) return null;
+    const value = match[1].replace(/^[\s:–—-]+|[\s:–—-]+$/g, '').trim();
+    if (!value || /^(learn more|loading(?:…|\.\.\.)?|back)$/i.test(value)) return null;
+    return value;
+  },
+  async primaryLocation(options) {
+    if (!options || typeof options !== 'object') throw new Error('primaryLocation options are required');
+    const accountId = String(options.account_id || options.accountId || '').trim();
+    if (!accountId) throw new Error('account_id must be a non-empty string');
+    const timeout = Number.isFinite(options.timeout_ms) ? Math.max(1000, options.timeout_ms) : 30000;
+    await this.assertAccount({accountId});
+    const started = Date.now();
+    const url = `https://www.facebook.com/primary_location/info?ref=bookmarks&_jev=${started}`;
+    await workflow.navigate(url);
+    let lastText = '';
+    while (Date.now() - started < timeout) {
+      const observed = await page.evaluate(() => ({
+        text: document.body?.innerText || '',
+        accountId: document.cookie.split(';').map(item => item.trim()).find(item => item.startsWith('c_user='))?.slice(7) || null,
+        url: location.href
+      })).catch(error => {
+        if (/execution context.*destroyed|navigation|cannot find context/i.test(error.message)) return null;
+        throw error;
+      });
+      if (observed) {
+        lastText = observed.text;
+        if (observed.accountId && observed.accountId !== accountId) {
+          throw new Error(`Primary-location page switched to account ${observed.accountId}; expected ${accountId}`);
+        }
+        const location = this.parsePrimaryLocation(observed.text);
+        if (location) return {accountId, location, state: 'location', url: observed.url || url, elapsedMs: Date.now() - started};
+        if (/log\s*in|create\s+new\s+account|session\s+expired/i.test(observed.text)) {
+          return {accountId, location: null, state: 'login', url: observed.url || url, elapsedMs: Date.now() - started};
+        }
+      }
+      await page.waitForTimeout(Math.min(250, Math.max(0, timeout - (Date.now() - started))));
+    }
+    return {accountId, location: null, state: 'unknown', url, elapsedMs: Date.now() - started, observedText: lastText.slice(0, 500)};
+  },
   async login(config, checkpoint, timeout = 60000) {
     const accountName = config.account_name || config.account;
     const started = Date.now();
