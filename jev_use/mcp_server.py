@@ -615,8 +615,9 @@ TOOLS: list[dict[str, Any]] = [
                     "type": "boolean",
                     "default": True,
                     "description": (
-                        "Dismiss recognized cookie/promotional overlays and the "
-                        "Facebook 'Sign in as' chooser before the script. Password "
+                        "Dismiss recognized cookie/promotional overlays, the "
+                        "'Sign in as' saved-account chooser, and the Google One Tap "
+                        "bubble before the script. Password "
                         "and unrelated dialogs are untouched."
                     ),
                 },

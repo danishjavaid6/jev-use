@@ -76,3 +76,12 @@ def test_environment_for_adds_a_shim_directory_to_path(monkeypatch, tmp_path):
 
     assert env["PATH"].startswith(str(tmp_path))
     assert "/system/bin" in env["PATH"]
+
+
+def test_dismiss_overlays_covers_google_one_tap_and_guards_password_forms():
+    snippet = betterwright.DISMISS_OVERLAYS_JS
+    assert "#credential_picker_container" in snippet, "must find the One Tap bubble"
+    assert "accounts" in snippet and "cancel" in snippet, "must prefer the official One Tap cancel"
+    assert "Sign in as" in snippet, "must still close the saved-account chooser"
+    assert 'input[type="password"]' in snippet, "must never close a container holding a password input"
+    assert "facebook.com" not in snippet, "chooser dismissal must not be limited to one site"

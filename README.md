@@ -106,8 +106,8 @@ Switching to interactive tools detaches the script worker, so keep a prepared
 workflow on the script path. A script failure is an MCP error, not a success.
 Do not replay a timed-out submission without checking whether it committed.
 
-Scripts dismiss recognized page overlays and the scoped Facebook `Sign in as`
-dialog. The selected tab also has native FedCM account chooser monitoring via
+Scripts dismiss recognized page overlays, the scoped `Sign in as` chooser,
+and the Google One Tap bubble. The selected tab also has native FedCM account chooser monitoring via
 CDP. Set `dismiss_overlays=false` to preserve these choosers. Password forms,
 other tabs and unrelated native dialogs are untouched. Unsupported native dialog
 monitoring is reported as a warning; other browser-owned UI may require manual

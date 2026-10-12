@@ -1144,6 +1144,25 @@ def test_browser_script_uses_betterwright_without_starting_the_jev_transport(
     assert '"result": "created"' in result
 
 
+def test_browser_script_prepends_overlay_dismissal_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen = {}
+
+    def fake_run_script(port, code, *, timeout, dismiss_overlays=True):
+        seen.update(port=port, code=code)
+        return {"ok": True, "result": "created"}
+
+    monkeypatch.setattr(mcp_server.betterwright, "run_script", fake_run_script)
+    monkeypatch.setattr(mcp_server.betterwright, "executable", lambda: "betterwright")
+    monkeypatch.setattr(mcp_server, "reset_browser_session", lambda: None)
+
+    mcp_server.tool_browser_script({"port": 12345, "code": "return page.title()"})
+
+    assert seen["code"].startswith(mcp_server.betterwright.DISMISS_OVERLAYS_JS)
+    assert seen["code"].endswith("return page.title()")
+
+
 def test_browser_profiles_is_advertised_as_the_first_call() -> None:
     tools = {t["name"]: t for t in mcp_server.TOOLS}
     assert "FIRST" in tools["browser_profiles"]["description"]

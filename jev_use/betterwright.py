@@ -29,16 +29,37 @@ class BetterWrightError(RuntimeError):
 
 DISMISS_OVERLAYS_JS = """\
 await overlays.dismiss();
-// Close only the Facebook 'Sign in as' chooser requested by the user.
-// Never click an unrelated Close button or dismiss the password form.
-if (/^https:\\/\\/(?:[^/]+\\.)?facebook\\.com(?:\\/|$)/i.test(page.url())) {
-    const chooser = page.locator('[role="dialog"], dialog').filter({
-        has: page.getByText('Sign in as', { exact: true })
-    });
-    if (await chooser.count() === 1 && await chooser.isVisible()) {
-        await chooser.getByRole('button', { name: 'Close', exact: true }).click();
-        await chooser.waitFor({ state: 'hidden', timeout: 5000 });
+// Close credential-picker popups that block the page: the Facebook 'Sign in
+// as' saved-account chooser and the Google One Tap 'Sign in as' bubble (the
+// screenshot-style overlay with 'Continue as ...'). Never click an unrelated
+// Close button and never touch a password form: each branch requires a
+// chooser-shaped container with no password input inside.
+const signInDialogs = page.locator('[role="dialog"], dialog').filter({
+    has: page.getByText('Sign in as', { exact: true })
+});
+const dialogCount = await signInDialogs.count();
+for (let index = 0; index < dialogCount; index++) {
+    const dialog = signInDialogs.nth(index);
+    if (!await dialog.isVisible().catch(() => false)) continue;
+    if (await dialog.locator('input[type="password"], input[name="pass"]').count()) continue;
+    const close = dialog.getByRole('button', { name: 'Close', exact: true });
+    if (await close.count() !== 1) continue;
+    await close.click();
+    await dialog.waitFor({ state: 'hidden', timeout: 5000 });
+}
+// Google One Tap renders in #credential_picker_container, not a dialog.
+const picker = page.locator('#credential_picker_container');
+if (await picker.count() && await picker.isVisible().catch(() => false)) {
+    await page.evaluate(() => { try { window.google?.accounts?.id?.cancel(); } catch (error) {} });
+    if (await picker.isVisible().catch(() => false)) {
+        const frameClose = page.frame_locator('#credential_picker_iframe').getByRole('button', { name: /close/i }).first();
+        if (await frameClose.count().catch(() => 0) && await frameClose.isVisible().catch(() => false)) {
+            await frameClose.click({ timeout: 3000 });
+        } else {
+            await picker.evaluate((element) => { element.style.display = 'none'; });
+        }
     }
+    await picker.waitFor({ state: 'hidden', timeout: 5000 }).catch(() => {});
 }
 """
 

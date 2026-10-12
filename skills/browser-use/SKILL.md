@@ -38,8 +38,9 @@ and recovery rules; do not recreate the script from scratch.
    selectors are unknown, then write the script and run it. Do not switch to
    agent-browser for the same page. Install it once with
    `bun install -g betterwright` and verify the script result.
-   `browser_script` dismisses recognized cookie/promotional overlays and the
-   Facebook `Sign in as` chooser shown with a `Close` button by default. It
+   `browser_script` dismisses recognized cookie/promotional overlays, the
+   `Sign in as` saved-account chooser, and the Google One Tap bubble
+   (`Continue as ...` with a close control) by default. It
    verifies that the chooser disappears before running the script. Set
    `dismiss_overlays=false` to keep it open. Password forms and unrelated dialogs
    stay open. If this popup appears midway through a script, repeat the same
