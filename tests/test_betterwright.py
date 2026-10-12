@@ -85,3 +85,10 @@ def test_dismiss_overlays_covers_google_one_tap_and_guards_password_forms():
     assert "Sign in as" in snippet, "must still close the saved-account chooser"
     assert 'input[type="password"]' in snippet, "must never close a container holding a password input"
     assert "facebook.com" not in snippet, "chooser dismissal must not be limited to one site"
+
+
+def test_dismiss_overlays_blocks_notice_bubbles_without_allowing_anything():
+    snippet = betterwright.DISMISS_OVERLAYS_JS
+    assert "notif" in snippet.lower(), "must recognise notification-permission bubbles"
+    assert "Block" in snippet and "Maybe later" in snippet, "must press dismissive controls"
+    assert "{ name: 'Allow'" not in snippet and '{ name: "Allow"' not in snippet, "must never click an affirmative control"

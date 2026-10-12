@@ -185,3 +185,20 @@ test('navigation waits for commit instead of the slow SPA load event', async () 
   f.page.goto=async (url,options)=>{assert.equal(accepted,true);assert.equal(options.waitUntil,'commit');assert.equal(options.timeout,45000);return url;};
   assert.equal(await f.workflow.navigate('https://www.facebook.com/'),'https://www.facebook.com/');
 });
+
+test('dismisses a notification-permission dialog through Block, never Allow', async () => {
+  const clicks = [];
+  const prompt = {
+    isVisible: async () => true,
+    getByRole: (role, { name }) => ({ first: () => ({
+      isVisible: async () => name.test('Block'),
+      click: async () => { clicks.push('Block'); },
+    })}),
+  };
+  const sandbox = { state: {}, dialogs: { acceptNext: async () => {} }, page: {
+    locator: () => ({ count: async () => 1, nth: () => prompt }),
+  } };
+  vm.runInNewContext(source + '\nglobalThis.workflow = workflow;', sandbox);
+  await sandbox.workflow.dismissPagePrompts();
+  assert.deepEqual(clicks, ['Block']);
+});
