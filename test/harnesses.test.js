@@ -27,19 +27,30 @@ const vscode = require('../lib/harnesses/vscode');
 const registry = require('../lib/harnesses');
 
 const ENTRY = { command: '/usr/bin/node', args: ['/opt/jev-use/bin/jev-use-mcp.js'] };
+// Command Code launches through a shell on Windows, so its adapter quotes paths there.
+const COMMANDCODE_ENTRY = paths.IS_WINDOWS
+  ? { command: commandcode.quoteWindows(ENTRY.command), args: ENTRY.args.map(commandcode.quoteWindows) }
+  : ENTRY;
 
 let home;
 let originalHome;
+let originalAppData;
 
 beforeEach(() => {
   home = fs.mkdtempSync(path.join(os.tmpdir(), 'jev-home-'));
   originalHome = paths.HOME;
   paths.HOME = home;
   delete process.env.XDG_CONFIG_HOME;
+  // Windows resolves VS Code and OpenCode through %APPDATA%; point it at the
+  // POSIX-style ~/.config the tests write so neither touches the real profile.
+  originalAppData = process.env.APPDATA;
+  process.env.APPDATA = path.join(home, '.config');
 });
 
 afterEach(() => {
   paths.HOME = originalHome;
+  if (originalAppData === undefined) delete process.env.APPDATA;
+  else process.env.APPDATA = originalAppData;
   fs.rmSync(home, { recursive: true, force: true });
 });
 
@@ -60,8 +71,8 @@ test('commandcode adds the transport and enabled keys its schema needs', () => {
   const entry = readJson(file).mcpServers['jev-use'];
   assert.equal(entry.transport, 'stdio');
   assert.equal(entry.enabled, true);
-  assert.equal(entry.command, ENTRY.command);
-  assert.deepEqual(entry.args, ENTRY.args);
+  assert.equal(entry.command, COMMANDCODE_ENTRY.command);
+  assert.deepEqual(entry.args, COMMANDCODE_ENTRY.args);
 });
 
 test('commandcode preserves other servers already configured', () => {
@@ -277,7 +288,7 @@ test('opencode refuses a jsonc file with comments instead of eating them', () =>
 test('commandcode reads its own entry back, command and args', () => {
   fs.mkdirSync(path.join(home, '.commandcode'), { recursive: true });
   commandcode.register(ENTRY);
-  assert.deepEqual(commandcode.registered(), ENTRY);
+  assert.deepEqual(commandcode.registered(), COMMANDCODE_ENTRY);
 });
 
 test('codex reads its block back, including the args array', () => {
