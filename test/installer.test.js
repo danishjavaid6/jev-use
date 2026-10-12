@@ -34,6 +34,7 @@ let originalEnsure;
 let originalDriverEnsure;
 let originalPackageRoot;
 let originalXdg;
+let originalAppData;
 
 beforeEach(() => {
   dir = fs.mkdtempSync(path.join(os.tmpdir(), 'jev-installer-'));
@@ -51,6 +52,9 @@ beforeEach(() => {
   paths.stateDir = () => dir;
   paths.HOME = dir;
   delete process.env.XDG_CONFIG_HOME;
+  // Windows resolves VS Code and OpenCode through %APPDATA%, not HOME.
+  originalAppData = process.env.APPDATA;
+  process.env.APPDATA = path.join(dir, 'AppData', 'Roaming');
 
   runtime.ensure = async () => {
     throw new Error('no usable python');
@@ -67,6 +71,8 @@ afterEach(() => {
   paths.packageRoot = originalPackageRoot;
   if (originalXdg === undefined) delete process.env.XDG_CONFIG_HOME;
   else process.env.XDG_CONFIG_HOME = originalXdg;
+  if (originalAppData === undefined) delete process.env.APPDATA;
+  else process.env.APPDATA = originalAppData;
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
