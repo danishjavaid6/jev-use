@@ -121,3 +121,7 @@ creation attempts keep their original guards. Vision failures report `phase`
 For maintenance or a focused manual recovery, read
 [structured actions](references/structured-actions.md). For an explicitly
 requested older scripted workflow, read [legacy mode](references/legacy-runner.md).
+
+The legacy runner also retains the read-only `primaryLocation` helper and
+[scripts/batch-todo.js](scripts/batch-todo.js). See the legacy reference for
+those APIs; structured jobs use `browser_facebook_run` for durable progress.

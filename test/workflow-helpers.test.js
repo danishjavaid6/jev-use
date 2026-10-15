@@ -259,3 +259,20 @@ test('an obstructed category suggestion cannot trigger an unverified keyboard se
   await assert.rejects(f.workflow.fillPage({ pageName: 'Page', bio: 'Bio' }), /suggestion obstructed/);
   assert.equal(keys, 0);
 });
+
+test('dismisses a notification-permission dialog through Block, never Allow', async () => {
+  const clicks = [];
+  const prompt = {
+    isVisible: async () => true,
+    getByRole: (role, { name }) => ({ first: () => ({
+      isVisible: async () => name.test('Block'),
+      click: async () => { clicks.push('Block'); },
+    })}),
+  };
+  const sandbox = { state: {}, dialogs: { acceptNext: async () => {} }, page: {
+    locator: () => ({ count: async () => 1, nth: () => prompt }),
+  } };
+  vm.runInNewContext(source + '\nglobalThis.workflow = workflow;', sandbox);
+  await sandbox.workflow.dismissPagePrompts();
+  assert.deepEqual(clicks, ['Block']);
+});

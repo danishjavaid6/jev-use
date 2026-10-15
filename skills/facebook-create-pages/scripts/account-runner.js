@@ -5,10 +5,10 @@ const facebookPages = {
     for (const key of ['run_id', 'account', 'page_name']) {
       if (typeof options[key] !== 'string' || !options[key].trim()) throw new Error(`${key} must be a non-empty string`);
     }
-    const browseSeconds = options.browse_seconds ?? 180;
+    const browseSeconds = options.browse_seconds ?? 30;
     const settleMs = options.post_fill_delay_ms ?? 0;
-    const alertSettleSeconds = options.alert_settle_seconds ?? 20;
-    const successBrowseSeconds = options.post_success_browse_seconds ?? 30;
+    const alertSettleSeconds = options.alert_settle_seconds ?? 0;
+    const successBrowseSeconds = options.post_success_browse_seconds ?? 0;
     if (!Number.isInteger(browseSeconds) || browseSeconds < 30 || browseSeconds > 180) throw new Error('browse_seconds must be an integer from 30 to 180');
     if (!Number.isInteger(alertSettleSeconds) || alertSettleSeconds < 0 || alertSettleSeconds > 60) throw new Error('alert_settle_seconds must be an integer from 0 to 60');
     if (!Number.isInteger(settleMs) || settleMs < 0 || settleMs > 180000) throw new Error('post_fill_delay_ms must be an integer from 0 to 180000');
@@ -52,6 +52,50 @@ const facebookPages = {
       if (expected.id && visibleIds.size) return visibleIds.has(expected.id);
       return names.includes(normalize(expected.name));
     }, { name: account_name || account, id: account_id }) === true;
+  },
+  parsePrimaryLocation(text) {
+    // Facebook has changed the markup around this page several times. Read the
+    // rendered text and anchor on the stable heading instead of a CSS selector.
+    const normalized = String(text || '').replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim();
+    const match = normalized.match(/your\s+primary\s+location\s+is\s+near\s*:?\s*(.*?)(?=\s+primary\s+location\s+is\s+determined\b|$)/i);
+    if (!match) return null;
+    const value = match[1].replace(/^[\s:–—-]+|[\s:–—-]+$/g, '').trim();
+    if (!value || /^(learn more|loading(?:…|\.\.\.)?|back)$/i.test(value)) return null;
+    return value;
+  },
+  async primaryLocation(options) {
+    if (!options || typeof options !== 'object') throw new Error('primaryLocation options are required');
+    const accountId = String(options.account_id || options.accountId || '').trim();
+    if (!accountId) throw new Error('account_id must be a non-empty string');
+    const timeout = Number.isFinite(options.timeout_ms) ? Math.max(1000, options.timeout_ms) : 30000;
+    await this.assertAccount({accountId});
+    const started = Date.now();
+    const url = `https://www.facebook.com/primary_location/info?ref=bookmarks&_jev=${started}`;
+    await workflow.navigate(url);
+    let lastText = '';
+    while (Date.now() - started < timeout) {
+      const observed = await page.evaluate(() => ({
+        text: document.body?.innerText || '',
+        accountId: document.cookie.split(';').map(item => item.trim()).find(item => item.startsWith('c_user='))?.slice(7) || null,
+        url: location.href
+      })).catch(error => {
+        if (/execution context.*destroyed|navigation|cannot find context/i.test(error.message)) return null;
+        throw error;
+      });
+      if (observed) {
+        lastText = observed.text;
+        if (observed.accountId && observed.accountId !== accountId) {
+          throw new Error(`Primary-location page switched to account ${observed.accountId}; expected ${accountId}`);
+        }
+        const location = this.parsePrimaryLocation(observed.text);
+        if (location) return {accountId, location, state: 'location', url: observed.url || url, elapsedMs: Date.now() - started};
+        if (/log\s*in|create\s+new\s+account|session\s+expired/i.test(observed.text)) {
+          return {accountId, location: null, state: 'login', url: observed.url || url, elapsedMs: Date.now() - started};
+        }
+      }
+      await page.waitForTimeout(Math.min(250, Math.max(0, timeout - (Date.now() - started))));
+    }
+    return {accountId, location: null, state: 'unknown', url, elapsedMs: Date.now() - started, observedText: lastText.slice(0, 500)};
   },
   async login(config, checkpoint, timeout = 60000) {
     const accountName = config.account_name || config.account;
@@ -203,12 +247,12 @@ const facebookPages = {
     // Notification-permission alerts can appear after login; give them a
     // bounded settle window (page-owned alerts are auto-accepted by the
     // bridge, in-page prompts are dismissed) before browsing.
-    await this.measure(checkpoint, 'alertSettleMs', () => workflow.settleAlerts({ seconds: config.alert_settle_seconds ?? 20 }));
-    await this.measure(checkpoint, 'browsingMs', () => workflow.browseFeed({ seconds: config.browse_seconds ?? 180, discoverVideoSurface: true }));
+    if ((config.alert_settle_seconds ?? 0) > 0) await this.measure(checkpoint, 'alertSettleMs', () => workflow.settleAlerts({ seconds: config.alert_settle_seconds }));
+    await this.measure(checkpoint, 'browsingMs', () => workflow.browseFeed({ seconds: config.browse_seconds ?? 30, discoverVideoSurface: true }));
     if (!checkpoint.browsed) throw new Error('Feed browsing completed without observed video playback; inspect Videos/Reels once before continuing');
     if (!page.url().startsWith('https://www.facebook.com/pages/create')) await this.measure(checkpoint, 'formNavigationMs', () => workflow.navigate('https://www.facebook.com/pages/create/'));
     // The creation form can raise its own notification prompt; settle before filling.
-    await this.measure(checkpoint, 'formAlertSettleMs', () => workflow.settleAlerts({ seconds: config.alert_settle_seconds ?? 20 }));
+    if ((config.alert_settle_seconds ?? 0) > 0) await this.measure(checkpoint, 'formAlertSettleMs', () => workflow.settleAlerts({ seconds: config.alert_settle_seconds }));
     await this.measure(checkpoint, 'formFillMs', () => workflow.fillPage({
       timeout: 45000,
       pageName: config.page_name,
@@ -239,7 +283,7 @@ const facebookPages = {
       await this.measure(checkpoint, 'confirmationMs', () => workflow.confirmCreated(config.confirmation || {}));
     }
     if (checkpoint.stage !== 'created') throw new Error(`Cannot finish stage ${checkpoint.stage}; prepare or inspect without another creation click`);
-    await this.measure(checkpoint, 'postCreateBrowsingMs', () => this.browseAfterCreation(checkpoint, config.post_success_browse_seconds ?? 30));
+    await this.measure(checkpoint, 'postCreateBrowsingMs', () => this.browseAfterCreation(checkpoint, config.post_success_browse_seconds ?? 0));
     return this.measure(checkpoint, 'logoutMs', () => workflow.logout(config.logout || {}));
   }
 };

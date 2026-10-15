@@ -163,3 +163,19 @@ def test_read_reconnect_closes_only_sdk_client_and_keeps_exact_tab(monkeypatch):
     assert closed == [True]
     assert betterwright._WORKFLOW_TABS[9222] == ("ws", "same-tab")
     assert 9222 not in betterwright._BRIDGES
+
+
+def test_dismiss_overlays_covers_google_one_tap_and_guards_password_forms():
+    snippet = betterwright.DISMISS_OVERLAYS_JS
+    assert "#credential_picker_container" in snippet, "must find the One Tap bubble"
+    assert "accounts" in snippet and "cancel" in snippet, "must prefer the official One Tap cancel"
+    assert "Sign in as" in snippet, "must still close the saved-account chooser"
+    assert 'input[type="password"]' in snippet, "must never close a container holding a password input"
+    assert "facebook.com" not in snippet, "chooser dismissal must not be limited to one site"
+
+
+def test_dismiss_overlays_blocks_notice_bubbles_without_allowing_anything():
+    snippet = betterwright.DISMISS_OVERLAYS_JS
+    assert "notif" in snippet.lower(), "must recognise notification-permission bubbles"
+    assert "Block" in snippet and "Maybe later" in snippet, "must press dismissive controls"
+    assert "{ name: 'Allow'" not in snippet and '{ name: "Allow"' not in snippet, "must never click an affirmative control"
