@@ -17,7 +17,7 @@ user wants a visible browser. Never kill an unrelated browser to do this.
 Do not operate the same page the user is actively editing.
 
 For repeated Facebook Page creation, load `facebook-create-pages` and use its
-bundled `facebookPages` runner. That skill contains the focused account workflow
+structured `browser_facebook` actions. That skill contains the focused account workflow
 and recovery rules; do not recreate the script from scratch.
 
 1. Call `browser_profiles` once. Reuse the matching live CDP port.
@@ -31,13 +31,14 @@ and recovery rules; do not recreate the script from scratch.
 4. Exact action: `browser_action(port=N, action="click", label="Save")` or
    `action="fill", label="Email", text="user@example.com"`. Scroll uses
    `action="scroll_down"`. This acts once and returns text without a Jev call.
-   For any repeated login, account switch, form, wizard, or checkout workflow,
+   For Facebook Page creation, use `browser_facebook` instead of scripts.
+   For other repeated login, account switch, form, wizard, or checkout workflows,
    **MUST use `browser_script`** with one prepared BetterWright Playwright
    snippet per account. It attaches to the returned port, does not launch
    another browser, and avoids a model round-trip per click. Inspect once if
    selectors are unknown, then write the script and run it. Do not switch to
    agent-browser for the same page. Install it once with
-   `bun install -g betterwright` and verify the script result.
+   `pnpm add -g betterwright` and verify the script result.
    `browser_script` dismisses recognized cookie/promotional overlays and the
    Facebook `Sign in as` chooser shown with a `Close` button by default. It
    verifies that the chooser disappears before running the script. Set
@@ -62,50 +63,21 @@ and recovery rules; do not recreate the script from scratch.
    state before retrying: a submission may already have committed.
    `settle` is SECONDS, limited to 0–10: use `5`, never `5000`. Stop after two
    failed actions on the same control and inspect the real target.
-   Repeated Facebook Page jobs MUST reuse the supplied workflow helpers, not
-   re-discover the same flow or invent manual fallback clicks:
-   - `workflow.begin(runId, account)` uses stable IDs across retries.
-   - `workflow.loginSavedAccount({accountName,password})` selects the saved card,
-     waits for either password OR signed-in state, and submits the password with
-     Enter. Caller may override observed account/signed-in selectors if needed.
-   - `await workflow.browseFeed({seconds:30})` before opening the Create Page form; the bundled runner has no post-fill wait and no post-creation feed scroll by default. Pass explicit options only when the user requests longer pacing.
-     If no video plays, inspect Videos/Reels once; never invent playback.
-   - `workflow.fillPage({pageName,bio})` fills name/category/bio, waits for the
-     Reel creator suggestion, selects it, and verifies the Create Page control
-     is actionable WITHOUT clicking. Do not use a keyboard category fallback.
-   - `workflow.beforeCreate(pageName)` saves a reservation; end this call.
-   - Submit through the tool's `submission:{run_id,account}` argument. Default
-     control is the button ROLE named Create Page (including div[role=button]).
-     The tool checks actionability BEFORE reserving the attempt on disk. Reads
-     and selector-validation failures no longer consume submission permission.
-     Code runs AFTER that one click: `await workflow.confirmCreated(); return
-     await workflow.logout();` batches delayed confirmation and logout.
-   - Confirmation waits up to 30 seconds for the exact creation notice. Never
-     treat a disabled button or unchanged URL as proof of failure. Once clicked,
-     retry only confirmation or logout. NEVER manually click Create Page again,
-     clear the journal, change run IDs, or infer completion solely from an
-     "already manage a Page" error. Observe the actual notice or Page ID/URL.
-   - `workflow.logout()` accepts the wizard's beforeunload, navigates to the
-     observed main Facebook URL, opens the Your profile button by role (no
-     aria-haspopup assumptions), clicks Log Out, and waits for the chooser.
-     Do not invent logout.php tokens, clear cookies, probe hidden APIs, or search
-     for the created Page by name. Caller may override observed menu selectors.
-   Typically use two calls/account: login+browse+fill+reserve, then tool submission
-   with code confirm+logout. A confirmed selector mismatch permits one inspection
-   and correction; do not inspect between every successful step. Start each
-   phase with the same workflow.begin IDs after reconnecting. Use a stable
-   checkpoint_scope when attaching to a profile opened elsewhere; this server
-   uses the GoLogin profile ID automatically when it opened the profile.
-   Keep default overlay dismissal enabled: the screenshot's Sign in as chooser
-   is a blocking credential selector, separate from Facebook's password form.
-   On Windows its scoped Close button is also handled through UI Automation.
-   Do not disable dismissal just because the task includes login.
+   Facebook Page workflows are maintained in the `facebook-create-pages` skill.
+   Use its structured tools, popup checks, Home/Reels browsing, and checkpoint
+   recovery. Do not substitute the older two-call script flow unless the user
+   explicitly requests that mode.
    If the target is ambiguous or needs several steps without a prepared script, use
    `browser_use(port=N, goal="...", act=true)`: Jev chooses from real controls.
    Keep goals short; use `decompose=false` for a single step. Verify the result.
 5. After a GoLogin task call `browser_close()` to save its state.
 
 If MCP tools are missing, search once, then use the built-in shell fallback:
+
+Exception: GoLogin multi-call workflows require a persistent MCP connection.
+The one-shot CLI's exit cleanup stops a profile it opened. For Facebook Page
+jobs, follow `facebook-create-pages`: report missing MCP tools and reload the
+harness connection; never make a background holder/driver script.
 
 ```text
 jev-use call browser_profiles

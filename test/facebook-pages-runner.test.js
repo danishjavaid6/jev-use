@@ -32,7 +32,8 @@ function fixture({ withDialogs = false } = {}) {
     workflow: {
       begin: () => record,
       navigate: async url => events.push(['goto',url]),
-      browseFeed: async options => { assert.equal(options.seconds,30); record.browsed=true; events.push(['browse']); },
+      settleAlerts: async options => { assert.equal(options.seconds,20); events.push(['settle']); },
+      browseFeed: async options => { assert.equal(options.seconds,180); record.browsed=true; events.push(['browse']); },
       fillPage: async () => events.push(['fill']),
       beforeCreate: name => { record.pageName=name; record.stage='submission_reserved'; events.push(['reserve']); return record; },
       validateCreation: async () => events.push(['validate']),
@@ -49,12 +50,13 @@ test('prepares then confirms and logs out without retaining the password', async
   const f = fixture();
   assert.equal((await f.runner.prepare(config)).stage, 'submission_reserved');
   assert.equal(f.record.accountId,'account-123');
-  assert.deepEqual(f.events.map(event=>event[0]), ['login','browse','goto','fill','reserve']);
+  assert.deepEqual(f.events.map(event=>event[0]), ['login','settle','browse','goto','settle','fill','reserve']);
   assert.ok(!JSON.stringify(f.record).includes(config.password));
   assert.ok(!JSON.stringify(f.record).includes('never-return-this'));
   f.record.stage='submitting'; // Bridge journals and performs the one creation click.
   assert.equal((await f.runner.finish(config)).stage,'logged_out');
-  assert.deepEqual(f.events.slice(-2).map(event=>event[0]),['confirm','logout']);
+  // finish confirms, browses home for 30s (no event), then logs out via chooser
+  assert.deepEqual(f.events.slice(-3).map(event=>event[0]),['confirm','goto','logout']);
 });
 
 test('an existing reservation validates without logging in, browsing or creating again', async () => {
@@ -100,6 +102,21 @@ test('slow remembered login waits for identity without repeated clicks or reload
   assert.equal(f.record.accountId,'account-123');
 });
 
+test('creation defaults to a 30-second home browse before logout', async () => {
+  const f = fixture();
+  f.record.stage='submitting'; f.setIdentity('account-123'); f.record.accountId='account-123'; f.record.browsed=true;
+  await f.runner.finish(config);
+  assert.deepEqual(f.events.map(event=>event[0]), ['confirm','goto','logout']);
+});
+
+test('a zero post-creation browse skips the home scroll', async () => {
+  const f = fixture();
+  f.record.stage='submitting'; f.setIdentity('account-123'); f.record.accountId='account-123'; f.record.browsed=true;
+  await f.runner.finish({...config, post_success_browse_seconds: 0});
+  assert.ok(!f.events.some(event=>event[0]==='goto'));
+  assert.equal(f.record.stage,'logged_out');
+});
+
 test('arms native dialog handling before saved-card selection', async () => {
   const f = fixture({ withDialogs: true });
   f.setDelay(500);
@@ -114,6 +131,16 @@ test('wrong or unverified existing identity never reaches browsing or creation',
   assert.equal(f.events.length,0);
 });
 
+test('a matching display name cannot override an explicit different account ID', async () => {
+  const f = fixture();
+  f.setIdentity('another-id');
+  f.setMatched(true);
+  await assert.rejects(f.runner.login({ ...config, account_id: 'requested-id' }, f.record, 1000), /differs from the explicitly verified/);
+  assert.equal(f.record.accountId, undefined);
+  assert.equal(f.record.loginFailure.code, 'wrong_active_account');
+  assert.equal(f.events.length, 0);
+});
+
 test('a pending login is resumed without selecting the saved card again', async () => {
   const f=fixture(); f.record.loginCardClicked=true;
   await assert.rejects(f.runner.prepare(config), /identity did not become verifiable/);
@@ -124,6 +151,16 @@ test('a pending login is resumed without selecting the saved card again', async 
   assert.equal(f.record.loginObservation.passwordPromptVisible,false);
   assert.equal(f.record.loginObservation.passwordSubmissionAttempted,false);
   assert.ok(!JSON.stringify(f.record).includes(config.password));
+});
+
+test('saved-card navigation loss resumes waiting for identity without another card click', async () => {
+  const f = fixture();
+  let clicks = 0;
+  f.page.getByRole = () => ({ filter() { return this; }, isVisible: async () => true,
+    click: async () => { clicks++; f.setIdentity('account-123'); throw Error('Execution context was destroyed during navigation'); } });
+  assert.equal(await f.runner.login(config, f.record, 1000), 'signed_in');
+  assert.equal(clicks, 1);
+  assert.equal(f.record.accountId, 'account-123');
 });
 
 test('an inert saved card reports observations without inferring expired sessions or retrying', async () => {
@@ -156,4 +193,60 @@ test('identity verification requires the requested name on a link to the cookie 
   sandbox.document.querySelectorAll=()=>[{href:'https://www.facebook.com/profile.php?id=123',innerText:' Saved   account '}];
   assert.equal(await sandbox.runner.login(config,checkpoint,1000),'signed_in');
   assert.equal(checkpoint.accountId,'123');
+});
+
+test('password form verification stays inside its dialog and accepts only the requested name or public ID', async () => {
+  const sandbox = { URL, location: { href: 'https://www.facebook.com/' },
+    page: { evaluate: async (callback, argument) => callback(argument) },
+    document: { querySelector: () => ({ closest: () => ({ innerText: 'Another account\nPassword', querySelectorAll: () => [] }) }) },
+  };
+  vm.runInNewContext(source + '\nglobalThis.runner = facebookPages;', sandbox);
+  assert.equal(await sandbox.runner.passwordAccountMatches(config), false);
+  sandbox.document.querySelector = () => ({ closest: () => ({ innerText: ' Saved   account \nPassword', querySelectorAll: () => [] }) });
+  assert.equal(await sandbox.runner.passwordAccountMatches(config), true);
+  sandbox.document.querySelector = () => ({ closest: () => ({ innerText: 'Password', querySelectorAll: () => [{ href: 'https://www.facebook.com/profile.php?id=123' }] }) });
+  assert.equal(await sandbox.runner.passwordAccountMatches({ ...config, account_id: '123' }), true);
+  assert.equal(await sandbox.runner.passwordAccountMatches({ ...config, account_id: '456' }), false);
+  sandbox.document.querySelector = () => ({ closest: () => ({ innerText: 'Saved account\nPassword', querySelectorAll: () => [{ href: 'https://www.facebook.com/profile.php?id=999' }] }) });
+  assert.equal(await sandbox.runner.passwordAccountMatches({ ...config, account_id: '123' }), false);
+});
+
+test('an unexpected password form cannot receive credentials before account verification', async () => {
+  const f = fixture();
+  let fills = 0;
+  f.page.locator = () => ({ first() { return this; }, isVisible: async () => true, fill: async () => fills++ });
+  f.runner.passwordAccountMatches = async () => false;
+  await assert.rejects(f.runner.login(config, f.record, 1000), /does not visibly identify/);
+  assert.equal(fills, 0);
+  assert.equal(f.record.loginSubmitted, undefined);
+  assert.equal(f.record.loginFailure.code, 'wrong_or_unverified_password_form');
+  f.runner.passwordAccountMatches = async () => true;
+  f.page.locator = () => ({ first() { return this; }, isVisible: async () => true,
+    fill: async () => fills++, press: async () => f.setIdentity('account-123') });
+  assert.equal(await f.runner.login(config, f.record, 1000), 'signed_in');
+  assert.equal(fills, 1);
+  assert.equal(f.record.loginSubmitted, true);
+});
+
+test('a blocked Log in button preserves an unsubmitted attempt and resumes with a sole actual click', async () => {
+  const f = fixture();
+  let actualClicks = 0;
+  let blocked = true;
+  f.runner.passwordAccountMatches = async () => true;
+  f.page.locator = () => ({ first() { return this; }, isVisible: async () => true, fill: async () => {} });
+  f.page.getByRole = () => ({ filter() { return this; }, isVisible: async () => false,
+    click: async options => {
+      if (options?.trial) { if (blocked) throw Error('overlay blocks action'); return; }
+      actualClicks++; f.setIdentity('account-123');
+    } });
+  const options = { ...config, login_button: true };
+  await assert.rejects(f.runner.login(options, f.record, 1000), /not actionable/);
+  assert.equal(f.record.loginSubmitted, undefined);
+  assert.equal(f.record.loginFailure.code, 'login_button_not_actionable');
+  assert.equal(actualClicks, 0);
+  blocked = false;
+  await f.runner.login(options, f.record, 1000);
+  assert.equal(actualClicks, 1);
+  assert.equal(f.record.loginSubmitted, true);
+  assert.ok(!JSON.stringify(f.record).includes(config.password));
 });

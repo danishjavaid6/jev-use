@@ -179,6 +179,14 @@ test('doctor reports a live registration as ok', async () => {
   assert.ok(!/which is gone/.test(report), 'a path that exists is not reported as gone');
 });
 
+test('doctor checks launcher paths without treating a literal version argument as a file', async () => {
+  fs.mkdirSync(path.join(dir, '.commandcode'), { recursive: true });
+  commandcode.register({ command: process.execPath, args: [paths.mcpEntry(), 'facebook-actions-v2'] });
+  const report = await installer.doctor();
+  assert.match(report, /Command Code — registered(\n|$)/);
+  assert.ok(!report.includes('facebook-actions-v2, which is gone'));
+});
+
 test('doctor reports the slash commands, not only the server', async () => {
   fs.mkdirSync(path.join(dir, '.commandcode'), { recursive: true });
 

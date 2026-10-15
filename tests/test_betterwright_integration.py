@@ -105,10 +105,37 @@ def test_persistent_sdk_login_alert_and_hard_timeout(monkeypatch):
             result = betterwright.run_script(port, 'return page.url()', timeout=30)
             assert result['ok'] and result['result'] == url, result
             betterwright.close_sessions()
-            with pytest.raises(betterwright.BetterWrightError, match='tabs'):
-                betterwright.run_script(port, 'return page.url()', timeout=30)
+            # Exact target identity survives worker teardown; no URL ambiguity.
+            result = betterwright.run_script(port, 'return page.url()', timeout=30)
+            assert result['ok'] and result['result'] == url, result
             result = betterwright.run_script(port, 'return page.url()', timeout=30, page_url=url)
             assert result['ok'] and result['result'] == url, result
+            # Two identical URLs are correlated to the exact observed target.
+            original = result['workflowAttachment']['targetId']
+            harness = Harness(port=port)
+            harness.start()
+            try:
+                harness.open_tab(url)
+            finally:
+                harness.close()
+            betterwright.close_sessions()
+            result = betterwright.run_script(port, 'return page.url()', timeout=45,
+                page_target_id=original, facebook_workflow=True)
+            assert result['ok'] and result['result'] == url, result
+            assert result['workflowAttachment']['targetId'] == original
+            harness = Harness(port=port)
+            harness.start()
+            try:
+                harness.evaluate("document.body.insertAdjacentHTML('beforeend','<div>Use another profile</div>')", url_hint='target:' + original)
+            finally:
+                harness.close()
+            betterwright.close_sessions()
+            # An explicitly supplied URL overrides the pin and exercises the
+            # unique chooser selection across two identical local fixture URLs.
+            result = betterwright.run_script(port, 'return page.url()', timeout=60,
+                page_url=url, facebook_workflow=True)
+            assert result['ok'], result
+            assert result['workflowAttachment']['targetId'] == original
         finally:
             betterwright.close_sessions()
             browser.terminate()

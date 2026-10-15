@@ -39,10 +39,46 @@ const workflow = {
       page.locator('[aria-label="Your profile"]')
     ], timeout);
   },
+  exactAccountName(accountName) {
+    const words = String(accountName).trim().split(/\s+/).map(word => word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+    return new RegExp('^\\s*' + words.join('\\s+') + '\\s*$');
+  },
+  async publicAccountIds(card) {
+    return card.evaluate(element => {
+      const ids = new Set();
+      for (const attribute of ['data-userid', 'data-user-id', 'data-profileid', 'data-profile-id']) {
+        const value = element.getAttribute(attribute);
+        if (/^\d+$/.test(value || '')) ids.add(value);
+      }
+      for (const link of element.querySelectorAll('a[href]')) {
+        try {
+          const url = new URL(link.href, location.href);
+          if (!/(^|\.)facebook\.com$/.test(url.hostname)) continue;
+          const id = url.pathname === '/profile.php' ? url.searchParams.get('id') : url.pathname.match(/^\/(\d+)\/?$/)?.[1];
+          if (/^\d+$/.test(id || '')) ids.add(id);
+        } catch {}
+      }
+      return [...ids];
+    });
+  },
+  async savedAccountCard({ accountName, accountId }) {
+    const candidates = page.getByRole('button').filter({ hasText: this.exactAccountName(accountName) });
+    if (typeof candidates.count !== 'function' || await candidates.count() <= 1) return candidates;
+    if (accountId) {
+      const matches = [];
+      for (let index = 0; index < await candidates.count(); index++) {
+        if ((await this.publicAccountIds(candidates.nth(index))).includes(accountId)) matches.push(index);
+      }
+      if (matches.length === 1) return candidates.nth(matches[0]);
+    }
+    const error = new Error('Multiple saved accounts have this exact name; inspect their observed public account IDs before selecting');
+    error.code = 'ambiguous_saved_account';
+    throw error;
+  },
   async loginSavedAccount({ accountName, password, accountSelector, signedInSelector, timeout = 20000 }) {
     const card = await this.visibleControl(accountSelector ? [page.locator(accountSelector)] : [
-      page.getByRole('button').filter({ hasText: accountName }),
-      page.locator('div[role="button"]').filter({ hasText: accountName })
+      page.getByRole('button').filter({ hasText: this.exactAccountName(accountName) }),
+      page.locator('div[role="button"]').filter({ hasText: this.exactAccountName(accountName) })
     ], timeout);
     await card.click();
     const input = page.locator('input[name="pass"]').first();
@@ -78,8 +114,7 @@ const workflow = {
     } catch {
       const fallback = page.getByText(category, { exact: true }).last();
       await fallback.waitFor({ state: 'visible', timeout });
-      try { await fallback.click({ timeout: Math.min(timeout, 3000) }); }
-      catch { await categories.press('ArrowDown'); await categories.press('Enter'); }
+      await fallback.click({ timeout: Math.min(timeout, 3000) });
     }
     await description.fill(bio);
     await this.dismissPagePrompts();
@@ -104,8 +139,58 @@ const workflow = {
       }
     }
   },
+  async settleAlerts({ seconds = 20 } = {}) {
+    // Passive watch after login and after reaching the creation form: the CDP
+    // bridge auto-accepts page-owned JS alerts while overlay dismissal is on,
+    // so here we repeatedly clear in-page permission/notification prompts
+    // (e.g. "Turn on notifications") without touching other content.
+    if (!Number.isFinite(seconds) || seconds < 0 || seconds > 60) throw new Error('Alert settle must be 0–60 seconds');
+    const started = Date.now();
+    const deadline = started + seconds * 1000;
+    let dismissed = 0;
+    while (Date.now() < deadline) {
+      const before = Date.now();
+      try {
+        const prompts = page.locator('[role="dialog"], [aria-modal="true"]');
+        if (await prompts.count().catch(() => 0)) {
+          await this.dismissPagePrompts();
+          dismissed++;
+        }
+      } catch { /* A rerendered dialog is retried on the next pass. */ }
+      await page.waitForTimeout(Math.min(1000, Math.max(0, deadline - Date.now())));
+      if (Date.now() === before) break; // Clock did not advance; avoid a hot loop.
+    }
+    return { settledMs: Date.now() - started, promptsDismissed: dismissed };
+  },
+  async listSavedAccounts({ timeout = 15000 } = {}) {
+    // Read-only enumeration of the "Log into Facebook" saved-account chooser.
+    // Returns visible card texts in DOM order; the caller matches them against
+    // its account inventory. Never clicks, fills, or consumes reservations.
+    await page.getByText(/^Log into Facebook$/i).first().waitFor({ state: 'visible', timeout }).catch(() => {});
+    const cards = page.locator('div[role="button"]');
+    const count = await cards.count().catch(() => 0);
+    const names = [];
+    for (let index = 0; index < count; index++) {
+      const text = await cards.nth(index).innerText().catch(() => '');
+      const name = String(text || '').replace(/\s+/g, ' ').trim();
+      if (name) names.push(name);
+    }
+    return names;
+  },
+  async listSavedAccountCards() {
+    const cards = page.locator('div[role="button"]');
+    const observed = [];
+    for (let index = 0; index < await cards.count(); index++) {
+      const card = cards.nth(index);
+      if (!await card.isVisible().catch(() => false)) continue;
+      const name = String(await card.innerText()).replace(/\s+/g, ' ').trim();
+      if (!name || /^(Use another profile|Add account|Remove account|Log in|Create new account)$/i.test(name)) continue;
+      observed.push({ name, publicAccountIds: await this.publicAccountIds(card) });
+    }
+    return observed;
+  },
   async browseFeed({ seconds = 30, discoverVideoSurface = false } = {}) {
-    if (!Number.isFinite(seconds) || seconds < 0 || seconds > 60) throw new Error('Feed duration must be 0–60 seconds');
+    if (!Number.isFinite(seconds) || seconds < 0 || seconds > 180) throw new Error('Feed duration must be 0–180 seconds');
     const checkpoint = this.status();
     if (checkpoint.browsed || checkpoint.stage === 'created' || checkpoint.stage === 'logged_out') return checkpoint.browsing;
     const started = Date.now();
@@ -131,8 +216,10 @@ const workflow = {
           playingObserved ||= playing;
         } catch { /* A scrolled-away video can disappear; inspect on the next pass. */ }
       }
-      // Let playback start before scrolling the video out of view.
-      await page.waitForTimeout(Math.min(3000, Math.max(0, deadline - Date.now())));
+      // Observe with human-like, uneven pacing: random pauses and scroll
+      // distances (mostly down, occasionally back up) instead of fixed steps.
+      const pause = 1500 + Math.random() * 3000;
+      await page.waitForTimeout(Math.min(pause, Math.max(0, deadline - Date.now())));
       for (let index = 0; index < count; index++) {
         try {
           playingObserved ||= await videos.nth(index).evaluate(video => !video.paused && video.readyState >= 2);
@@ -164,9 +251,13 @@ const workflow = {
           }
         }
       }
-      await page.mouse.wheel(0, 550);
+      const distance = 300 + Math.floor(Math.random() * 500);
+      if (page.mouse?.wheel) {
+        if (Math.random() < 0.85) await page.mouse.wheel(0, distance).catch(() => {});
+        else await page.mouse.wheel(0, -Math.floor(distance / 2)).catch(() => {});
+      }
       scrolls++;
-      // The three-second playback observation above supplies the requested browsing time.
+      // The randomized playback observation above supplies the requested browsing time.
     }
     checkpoint.browsed = Date.now() - started - navigationMs >= 30000 && playingObserved;
     checkpoint.browsing = { elapsedMs: Date.now() - started, navigationMs, scrolls, playingObserved };

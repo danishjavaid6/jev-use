@@ -19,6 +19,7 @@
     "!jev_use/cli.py",
     "!jev_use/loop.py",
     "skills",
+    "prompts",
     "scripts/enable-cdp.sh",
     "scripts/enable-cdp.ps1",
     "pyproject.toml",
