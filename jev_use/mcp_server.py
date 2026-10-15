@@ -1239,7 +1239,7 @@ def tool_browser_facebook_next(args: dict[str, Any]) -> str:
                 "profile": profile_id, "vendor": "gologin", "run_id": run_id,
                 "headless": False, "url": "https://www.facebook.com/"}),
             close_profile=lambda: tool_browser_close({}), action=tool_browser_facebook,
-            prepare_profile=_prepare_facebook_tab)
+            prepare_profile=_prepare_facebook_tab, recover_profile=_recover_facebook_connection)
     finally:
         _FACEBOOK_INTERNAL.reset(internal)
     if _GOLOGIN.get("session") is not None and _GOLOGIN.get("run_id") == args["run_id"]:
@@ -1258,6 +1258,14 @@ def _prepare_facebook_tab(run_id, owner):
     tab = betterwright.workflow_tab(owner.port, saved, create=True, preserve_creation=preserve)
     facebook_runs.task_progress(run_id, owner.profile.id, workflow_tab=tab, clear_failure=tab["created"])
     return tab["created"]
+
+
+def _recover_facebook_connection(run_id, owner):
+    facebook_runs.guard_profile(run_id, owner.profile.id)
+    facebook_runs.claim_worker(run_id, _FACEBOOK_WORKER_ID)
+    state = facebook_runs.status(run_id)
+    saved = state.get("controller", {}).get(owner.profile.id, {}).get("workflow_tab")
+    return betterwright.reconnect_workflow(owner.port, saved)
 
 
 def tool_browser_facebook_vision(args: dict[str, Any]) -> str:

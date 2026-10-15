@@ -65,6 +65,8 @@ def test_browsing_defaults_to_one_minute_without_extending_fixed_waits():
         code = facebook_pages.request({**BASE, "action": action})["code"]
         assert '"seconds": 60' in code
     assert '"seconds"' not in facebook_pages.request({**BASE, "action": "wait_home"})["code"]
+    assert facebook_pages.request({**BASE, "action": "status"})["timeout"] == 25
+    assert facebook_pages.request({**BASE, "action": "browse"})["timeout"] == 90
 
 
 def test_compact_response_keeps_current_evidence_and_popup_diagnostics():

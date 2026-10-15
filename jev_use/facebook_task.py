@@ -23,6 +23,8 @@ SCHEMA = {
         "Page details apply to the returned current account; supply only when requested. "
         "Each new user-authorized run creates one additional Page per observed account; "
         "only completion in THIS run is skipped. Resume retains this run's creation guards. "
+        "Transient live-status failures get up to three reads with same-tab reconnection; "
+        "mutating actions are never automatically replayed by those retries. "
         "Never run alongside another worker or use raw scripts to escape a blocker."
     ),
     "inputSchema": {
@@ -42,6 +44,34 @@ SCHEMA = {
 _LOCK = threading.Lock()
 _PASSWORDS: dict[str, tuple[str, float]] = {}
 _TTL = 30 * 60
+LIVE_STATUS_ATTEMPTS = 3
+
+
+class _ObservationStopped(Exception):
+    def __init__(self, status):
+        self.status = status
+
+
+class _ObservationUnavailable(Exception):
+    pass
+
+
+def _read_failure(exc: Exception) -> dict:
+    """Expose known causes, never raw backend errors or credential payloads."""
+    message = str(exc).lower()
+    if "live_ui_not_ready" in message:
+        code = "ui_not_ready"
+    elif "popup" in message or "dialog" in message or "uia" in message:
+        code = "popup_inspection_failed"
+    elif "execution context" in message or "navigation" in message or "cannot find context" in message:
+        code = "navigation_in_progress"
+    elif "target" in message or "tab" in message:
+        code = "workflow_tab_unavailable"
+    elif "disconnect" in message or "deadline" in message or "bridge" in message or "connection" in message:
+        code = "automation_connection_failed"
+    else:
+        code = "status_read_failed"
+    return {"code": code, "error_type": type(exc).__name__}
 
 
 def _matches(checkpoint: dict, account: dict) -> bool:
@@ -103,7 +133,7 @@ def _payload(text: str) -> dict:
     return result
 
 
-def advance(args: dict, *, owner, open_profile, close_profile, action, prepare_profile=None) -> dict:
+def advance(args: dict, *, owner, open_profile, close_profile, action, prepare_profile=None, recover_profile=None) -> dict:
     """Injected browser boundaries make restart/failure behavior replayable offline."""
     if set(args) - set(SCHEMA["inputSchema"]["properties"]):
         raise ValueError("Unsupported next-step argument")
@@ -118,20 +148,23 @@ def advance(args: dict, *, owner, open_profile, close_profile, action, prepare_p
         return {"status": "blocked", "reason": "another_controller_call_is_running"}
     try:
         return _advance(args, owner=owner, open_profile=open_profile,
-                        close_profile=close_profile, action=action, prepare_profile=prepare_profile)
+                        close_profile=close_profile, action=action, prepare_profile=prepare_profile,
+                        recover_profile=recover_profile)
     finally:
         _LOCK.release()
 
 
-def _advance(args, *, owner, open_profile, close_profile, action, prepare_profile=None):
+def _advance(args, *, owner, open_profile, close_profile, action, prepare_profile=None, recover_profile=None):
     run_id = args["run_id"]
     state = runs.status(run_id)
+    live_checks = {"attempts": 0, "reconnections": 0, "failures": []}
 
     def reply(status, **fields):
         verified = _verified_accounts(state)
         known = {(p["id"], a["account"]) for p in state["profiles"] for a in _known_accounts(state, p)}
         history = [c for p in state["profiles"] for c in p["checkpoints"] if c["run_id"] != run_id]
         return {"status": status, "run_id": run_id, **fields,
+                **({"live_status_checks": live_checks} if live_checks["failures"] else {}),
                 "page_goal": "one_new_page_per_account",
                 "history": {"previous_pages_created": sum(bool(c.get("completed")) for c in history),
                             "previous_unresolved_creations": sum(c.get("stage") in {"submission_reserved", "submitting", "created"}
@@ -192,6 +225,42 @@ def _advance(args, *, owner, open_profile, close_profile, action, prepare_profil
         if prepared:
             return reply("continue", **context, performed="prepare_workflow_tab")
     base = {"run_id": run_id, "port": port}
+
+    def check_read_allowed():
+        current = runs.status(run_id)
+        if current["status"] != "active":
+            forget(run_id)
+            raise _ObservationStopped("paused")
+        if current.get("pending_action"):
+            raise _ObservationStopped("needs_resume")
+
+    def read_status(call):
+        # Only observations are retried. Login, fill, Create and logout still
+        # execute at most once after a successful fresh observation.
+        for attempt in range(1, LIVE_STATUS_ATTEMPTS + 1):
+            check_read_allowed()
+            live_checks["attempts"] = attempt
+            try:
+                observed = _payload(action({**call, "action": "status"}))
+                if observed.get("current_state", {}).get("kind") == "unknown":
+                    raise RuntimeError("live_ui_not_ready")
+                check_read_allowed()
+                return observed
+            except _ObservationStopped:
+                raise
+            except Exception as exc:
+                live_checks["failures"].append({"attempt": attempt, **_read_failure(exc)})
+            check_read_allowed()
+            if attempt < LIVE_STATUS_ATTEMPTS:
+                if recover_profile is not None:
+                    try:
+                        recover_profile(run_id, current_owner)
+                        live_checks["reconnections"] += 1
+                    except Exception as exc:
+                        live_checks["failures"][-1]["recovery"] = _read_failure(exc)
+                time.sleep(attempt)  # 1s, then 2s; no unbounded model loop.
+        raise _ObservationUnavailable()
+
     checkpoints = [c for c in profile["checkpoints"] if c["run_id"] == run_id and c["account"] != "__inventory__"]
     saved = _known_accounts(state, profile)
 
@@ -208,7 +277,7 @@ def _advance(args, *, owner, open_profile, close_profile, action, prepare_profil
     if account is None and not progress.get("inventoried"):
         # On first attachment inspect live identity before assuming a chooser.
         try:
-            observed = _payload(action({**base, "account": "__inventory__", "action": "status"}))
+            observed = read_status({**base, "account": "__inventory__"})
             current = observed.get("current_state", {})
             if current.get("kind") != "account_chooser":
                 return reply("blocked", **context, reason="signed_in_or_unknown_account_without_checkpoint",
@@ -218,6 +287,10 @@ def _advance(args, *, owner, open_profile, close_profile, action, prepare_profil
                 return reply("blocked", **context, reason="no_saved_accounts_observed")
             runs.task_progress(run_id, profile_id, inventoried=True)
             return reply("continue", **context, performed="inventory", accounts_observed=len(inventory["accounts"]))
+        except _ObservationStopped as exc:
+            return reply(exc.status, **context, reason="run_stopped_during_status_recovery")
+        except _ObservationUnavailable:
+            return reply("blocked", **context, reason="live_status_unavailable", diagnostic_tool="browser_facebook_vision")
         except Exception:
             return reply("blocked", **context, reason="account_inventory_failed", diagnostic_tool="browser_facebook_vision")
     if account is None:
@@ -244,8 +317,10 @@ def _advance(args, *, owner, open_profile, close_profile, action, prepare_profil
         public["account_id"] = current_checkpoint["accountId"]
     call = {**base, **public, "account": account["account"]}
     try:
-        observed = _payload(action({**call, "action": "status"}))
-    except Exception:
+        observed = read_status(call)
+    except _ObservationStopped as exc:
+        return reply(exc.status, **context, reason="run_stopped_during_status_recovery")
+    except _ObservationUnavailable:
         return reply("blocked", **context, reason="live_status_unavailable", diagnostic_tool="browser_facebook_vision")
     stage = observed.get("stage", "started")
     live = observed.get("live_login", {})

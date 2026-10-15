@@ -98,6 +98,20 @@ def test_persistent_sdk_login_alert_and_hard_timeout(monkeypatch):
             assert clicks['result'] == 1
             with pytest.raises(betterwright.BetterWrightError):
                 betterwright.run_script(port, 'return 1', timeout=30, submission={"run_id":"fixture-run", "account":"fixture-account"})
+            # Status recovery replaces only the SDK worker. The browser, exact
+            # tab and committed creation journal must survive without a click.
+            ready = betterwright.run_script(port, "workflow.begin('fixture-run','fixture-account'); return workflow.status().stage", timeout=30)
+            assert ready['ok'] and ready['result'] == 'created', ready
+            target = betterwright._WORKFLOW_TABS[port][1]
+            worker = betterwright._BRIDGES[port][1].process.pid
+            assert betterwright.reconnect_workflow(port)['target_id'] == target
+            assert port not in betterwright._BRIDGES
+            assert betterwright.ws_url_for(port)
+            recovered = betterwright.run_script(port, "workflow.begin('fixture-run','fixture-account'); return {stage:workflow.status().stage,clicks:await page.evaluate(()=>window.createClicks)}", timeout=30)
+            assert recovered['ok'], recovered
+            assert recovered['result'] == {'stage':'created','clicks':1}
+            assert recovered['workflowAttachment']['targetId'] == target
+            assert betterwright._BRIDGES[port][1].process.pid != worker
             reserve = betterwright.run_script(port, "workflow.begin('timeout-run','fixture-account'); workflow.status().browsed=true; return workflow.beforeCreate('Timeout Page')", timeout=30)
             assert reserve['ok'], reserve
             # A second CDP client is supported: do not diagnose single-websocket ownership.

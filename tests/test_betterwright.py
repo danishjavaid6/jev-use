@@ -150,3 +150,16 @@ def test_dedicated_tab_survives_new_worker_but_lost_creation_tab_never_gets_repl
         betterwright.workflow_tab(9222, saved, create=True, preserve_creation=True)
     with pytest.raises(betterwright.BetterWrightError, match="workflow_tab_unavailable"):
         betterwright.workflow_tab(9222, saved)
+
+
+def test_read_reconnect_closes_only_sdk_client_and_keeps_exact_tab(monkeypatch):
+    saved = {"browser_id": "same-browser", "target_id": "same-tab"}
+    calls, closed = [], []
+    monkeypatch.setattr(betterwright, "workflow_tab", lambda port, state, **options: calls.append((port, state, options)) or saved)
+    monkeypatch.setattr(betterwright, "_BRIDGES", {9222: ("ws", type("Bridge", (), {"close": lambda self: closed.append(True)})())})
+    monkeypatch.setattr(betterwright, "_WORKFLOW_TABS", {9222: ("ws", "same-tab")})
+    assert betterwright.reconnect_workflow(9222, saved) == saved
+    assert calls == [(9222, saved, {"create": False})]
+    assert closed == [True]
+    assert betterwright._WORKFLOW_TABS[9222] == ("ws", "same-tab")
+    assert 9222 not in betterwright._BRIDGES

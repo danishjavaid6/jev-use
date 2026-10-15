@@ -243,6 +243,15 @@ def list_tabs(port: int) -> list[dict]:
         return [tab for tab in json.load(response) if tab.get("type") == "page"]
 
 
+def reconnect_workflow(port: int, saved: dict | None = None) -> dict:
+    """Reconnect our SDK client to the exact live tab, retaining browser/journals."""
+    tab = workflow_tab(port, saved, create=False)
+    existing = _BRIDGES.pop(port, None)
+    if existing:
+        existing[1].close()
+    return tab
+
+
 def close_sessions() -> None:
     for _, bridge in list(_BRIDGES.values()):
         bridge.close()

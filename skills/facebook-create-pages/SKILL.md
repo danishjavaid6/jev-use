@@ -55,6 +55,14 @@ until its profile is closed/saved; another worker receives a blocker.
 | `blocked` | Inspect the reason. If offered, call `browser_facebook_vision` once for read-only diagnosis, then report unresolved work. Do not loop or escape guards with scripts/new run IDs. |
 | `completed` | Report completion; the tool verified creation evidence, logout, inventories and profile closure. |
 
+Live-status reads get up to three attempts inside one `next` call, with short
+1s/2s delays and SDK reconnection to the same verified tab. No login, fill,
+Create or logout action is replayed by this recovery. A temporary unknown UI is
+reobserved too. `live_status_checks` reports attempt count, reconnections and
+sanitized causes when recovery was needed. A pause interrupts further attempts.
+After all three reads fail, use the offered diagnosis once and stop; do not
+start another job or keep retrying indefinitely.
+
 Supply a common password through the runtime `password` argument once when
 requested (or on the first next call). It stays only in this MCP process, scoped
 to the run, and expires after 30 minutes idle; pause, completion or process restart
@@ -69,6 +77,9 @@ persists these non-secret details before filling; never invent a different name
 after a failed fill or uncertain submission.
 
 On stop, call `browser_facebook_run(action="pause", run_id=RUN)` and cease calls.
+Call `browser_close` to save/close the profile owned by this connection when
+safe; report any closure failure explicitly. A blocked job also needs this
+cleanup. Never leave a browser open without reporting it.
 A submitted action may already have committed: preserve state for inspection on
 resume. Only one worker may own a run. If the agent/connection dies, resume from
 saved state rather than starting over. An uncertain submission in this job

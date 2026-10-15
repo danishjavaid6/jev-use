@@ -31,6 +31,10 @@ next. For blocked, use offered read-only vision diagnosis once and report the
 unresolved blocker. Do not loop, use raw scripts, guess passwords, change run
 IDs to escape guards, or bypass MFA/CAPTCHA. Only report completed when the
 tool returns completed. If I say stop, pause the run and cease new actions.
+The controller already retries transient live-status reads up to three times
+with same-tab reconnection; do not add an unbounded retry loop. Report the
+returned live_status_checks diagnostics if all attempts fail. After a blocker
+or stop, save/close the owned profile when safe and report closure failures.
 
 The backend owns account/profile selection, popup checks, current-state
 recovery, Home/Reels/Home browsing with varied pacing, single creation,

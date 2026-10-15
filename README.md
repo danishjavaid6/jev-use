@@ -119,6 +119,14 @@ Older unresolved attempts remain visible in history without being retried or
 silently marked successful. Current progress/results count only this job;
 `history` reports previous confirmed Pages and unresolved creation attempts.
 
+Transient live-status failures are checked up to three times per next-step
+call, with 1s/2s delays and a fresh SDK connection to the exact same tab. An
+unknown UI is reobserved before acting. Recovery keeps the browser, journal and
+submission guards intact; it never replays login, fill, Create or logout.
+`live_status_checks` reports attempts, reconnections and sanitized cause codes.
+Each status attempt has a 25-second deadline. Pause stops further attempts;
+after three failures the controller stops for diagnosis and profile cleanup.
+
 `browser_facebook_vision(run_id="my-batch")` adds experimental, read-only Jev
 1.14 screen classification, popup presence and a possible Close-button box.
 It sends `TypeSafe-Danger-Zone-Images: true`, with the image-capable SDK and

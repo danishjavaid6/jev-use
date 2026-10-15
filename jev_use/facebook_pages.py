@@ -71,7 +71,8 @@ def request(args, *, new_page_per_account=False):
         data["new_page_per_account"] = True
     if args["action"] in {"browse", "browse_after"}:
         data.setdefault("seconds", seconds)
-    options.update(timeout=90, facebook_workflow=True, code="return await facebookAgent.step(" + json.dumps(data) + ");")
+    options.update(timeout=25 if args["action"] == "status" else 90,
+                   facebook_workflow=True, code="return await facebookAgent.step(" + json.dumps(data) + ");")
     if args["action"] == "create":
         options["submission"] = {"run_id": args["run_id"], "account": args["account"], "verify_account": True}
     return options

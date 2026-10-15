@@ -90,6 +90,7 @@ class Browser:
 def browser(monkeypatch, tmp_path):
     monkeypatch.setenv("JEV_USE_WORKFLOW_DIR", str(tmp_path))
     task._PASSWORDS.clear()
+    monkeypatch.setattr(task.time, "sleep", lambda _: None)
     profiles = [gologin.GoLoginProfile("id-23", "Profile 23"), gologin.GoLoginProfile("id-29", "Profile 29")]
     runs.start("batch", None, None, profiles, profile_numbers=[29, 23])
     return Browser()
@@ -327,3 +328,123 @@ def test_new_request_preserves_all_old_attempts_without_retrying_them(browser, s
     assert result["history"]["previous_unresolved_creations"] == int(stage in {"submission_reserved", "submitting", "created"})
     assert browser.records[("id-29", "old", "Alice")] == old
     assert not any(e[1] in {"create", "confirm"} for e in browser.events)
+
+
+@pytest.mark.parametrize("failed_reads", [1, 2])
+def test_transient_status_reads_reconnect_and_continue_without_repeating_login(browser, failed_reads):
+    ready(browser)
+    browser.step(password="PRIVATE")
+    original = browser.action
+    reads, reconnected = [], []
+    def flaky(args):
+        if args["action"] == "status":
+            reads.append(args.copy())
+            if len(reads) <= failed_reads:
+                raise RuntimeError("Execution context destroyed during navigation PRIVATE")
+        return original(args)
+    result = task.advance({"run_id": "batch"}, owner=lambda: browser.session,
+                          open_profile=browser.open, close_profile=browser.close, action=flaky,
+                          recover_profile=lambda run, owner: reconnected.append((run, owner.port)))
+    assert result["performed"] == "wait_home"
+    assert result["live_status_checks"]["attempts"] == failed_reads + 1
+    assert result["live_status_checks"]["reconnections"] == failed_reads
+    assert len(reconnected) == failed_reads
+    assert {read["account"] for read in reads} == {"Alice"}
+    assert len([e for e in browser.events if e[1] == "login"]) == 1
+    assert len([e for e in browser.events if e[1] == "wait_home"]) == 1
+    assert "PRIVATE" not in json.dumps(result)
+
+
+def test_status_failure_stops_after_exactly_three_reads_without_any_mutation(browser):
+    ready(browser)
+    browser.fail = "status"
+    before = len(browser.events)
+    result = browser.step(password="PRIVATE")
+    assert result["reason"] == "live_status_unavailable"
+    assert result["live_status_checks"]["attempts"] == 3
+    assert len(result["live_status_checks"]["failures"]) == 3
+    assert [e[1] for e in browser.events[before:]] == ["status"] * 3
+    assert result["next_call"] is None
+    assert "SENSITIVE" not in json.dumps(result)
+
+
+def test_initial_inventory_status_also_retries_before_giving_up(browser):
+    assert browser.step()["performed"] == "open_profile"
+    browser.fail = "status"
+    result = browser.step()
+    assert result["reason"] == "live_status_unavailable"
+    assert result["live_status_checks"]["attempts"] == 3
+    assert not any(e[1] in {"accounts", "login", "create"} for e in browser.events)
+
+
+def test_unknown_live_ui_is_reobserved_before_any_workflow_action(browser):
+    ready(browser)
+    original = browser.action
+    reads = []
+    def warming(args):
+        if args["action"] == "status":
+            reads.append(True)
+            browser.status_override = {"current_state": {"kind": "unknown"}} if len(reads) < 3 else {}
+        return original(args)
+    result = task.advance({"run_id": "batch", "password": "PRIVATE"}, owner=lambda: browser.session,
+                          open_profile=browser.open, close_profile=browser.close, action=warming)
+    assert result["performed"] == "login"
+    assert result["live_status_checks"]["attempts"] == 3
+    assert all(f["code"] == "ui_not_ready" for f in result["live_status_checks"]["failures"])
+
+
+def test_stop_during_status_recovery_prevents_reconnect_or_another_read(browser):
+    ready(browser)
+    calls = []
+    def stop(args):
+        calls.append(args)
+        runs.transition("batch", "pause")
+        raise RuntimeError("Connection lost")
+    result = task.advance({"run_id": "batch"}, owner=lambda: browser.session,
+                          open_profile=browser.open, close_profile=browser.close, action=stop,
+                          recover_profile=lambda *args: pytest.fail("must not reconnect after stop"))
+    assert result["status"] == "paused"
+    assert len(calls) == 1
+
+
+def test_pause_during_a_successful_read_prevents_the_following_action(browser):
+    ready(browser)
+    original = browser.action
+    def stop_after_read(args):
+        result = original(args)
+        runs.transition("batch", "pause")
+        return result
+    before = len(browser.events)
+    result = task.advance({"run_id": "batch", "password": "PRIVATE"}, owner=lambda: browser.session,
+                          open_profile=browser.open, close_profile=browser.close, action=stop_after_read)
+    assert result["status"] == "paused"
+    assert [e[1] for e in browser.events[before:]] == ["status"]
+
+
+def test_failed_mutation_is_not_replayed_by_read_retries(browser):
+    ready(browser)
+    browser.step(password="PRIVATE")
+    for _ in range(10):
+        if browser.step()["status"] == "needs_input":
+            break
+    else:
+        pytest.fail("Did not reach Page inputs within bounded replay")
+    browser.step(page_name="Stable Page", category="Artist")
+    browser.fail = "create"
+    result = browser.step()
+    assert result["outcome"] == "requires_fresh_inspection"
+    assert len([e for e in browser.events if e[1] == "create"]) == 1
+
+
+def test_reconnect_failure_is_sanitized_and_never_changes_the_task(browser):
+    ready(browser)
+    browser.fail = "status"
+    def recover(*args):
+        raise RuntimeError("target unavailable PRIVATE")
+    result = task.advance({"run_id": "batch"}, owner=lambda: browser.session,
+                          open_profile=browser.open, close_profile=browser.close, action=browser.action,
+                          recover_profile=recover)
+    assert result["reason"] == "live_status_unavailable"
+    assert result["live_status_checks"]["attempts"] == 3
+    assert result["live_status_checks"]["failures"][0]["recovery"]["code"] == "workflow_tab_unavailable"
+    assert "PRIVATE" not in json.dumps(result)
