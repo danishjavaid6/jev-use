@@ -191,3 +191,7 @@ and actual elapsed times. Do not call a filled form or pending logout complete.
 For callers explicitly requesting the older scripted prepare/finish mode only,
 read [references/legacy-runner.md](references/legacy-runner.md). It is not the
 structured agent workflow above.
+
+The legacy runner also retains the read-only `primaryLocation` helper and
+[scripts/batch-todo.js](scripts/batch-todo.js). See the legacy reference for
+those APIs; structured jobs use `browser_facebook_run` for durable progress.

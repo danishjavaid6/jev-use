@@ -98,8 +98,8 @@ Reels/Videos link once if the home feed has no playback), opens the Page
 creation form, settles alerts for another 20 seconds, fills the Page form,
 waits through the configured post-fill settling delay, verifies it is ready,
 and saves `submission_reserved` without creating the Page. The bundled runner
-defaults to a 180-second browse, a 20-second alert settle
-(`alert_settle_seconds`), no post-fill delay, and a 30-second post-creation
+defaults to a 30-second browse, no alert-settling delay
+(`alert_settle_seconds`), no post-fill delay, and no post-creation
 home-feed scroll; override `browse_seconds`, `alert_settle_seconds`,
 `post_fill_delay_ms`, and `post_success_browse_seconds` deliberately when
 needed. If the user changes the browsing requirement, adapt that step
@@ -229,3 +229,38 @@ Use the exact profile/account ID and its mapped password slot directly. Do not
 try other password slots, rotate credentials, or retry a known account with a
 different password. If the runtime secret for a mapped slot is unavailable,
 record `missing_password` and continue.
+
+## Primary location
+
+For an already verified Facebook ID, the runner also exposes a read-only
+primary-location check. Pass the ID observed in the `c_user` identity cookie;
+the method refuses to return a location if Facebook switches accounts:
+
+```js
+return await facebookPages.primaryLocation({account_id: "<verified Facebook ID>"});
+```
+
+The result is `state: "location"` with `location` only when Facebook's page
+names a value. `login` and `unknown` are reported without guessing.
+
+
+### Batch todo file
+
+The loop above is long enough to lose your place on a restart. Track it in
+`runs/facebook-batch-todo.json` (local-only, gitignored) with the helper at
+[scripts/batch-todo.js](scripts/batch-todo.js). It stores profile/account
+statuses only — never passwords. `missing_password` and `mfa_required` are the
+only allowed skip reasons.
+
+```text
+node skills/facebook-create-pages/scripts/batch-todo.js init --file runs/facebook-batch-todo.json --batch B1 --profiles config/gologin-profiles.json
+node skills/facebook-create-pages/scripts/batch-todo.js add-accounts --file runs/facebook-batch-todo.json --profile-id <id> --accounts '[{"account":"Name","page_name":"Page"}]'
+node skills/facebook-create-pages/scripts/batch-todo.js next --file runs/facebook-batch-todo.json
+node skills/facebook-create-pages/scripts/batch-todo.js mark --file runs/facebook-batch-todo.json --profile-id <id> --account Name --status logged_out
+node skills/facebook-create-pages/scripts/batch-todo.js status --file runs/facebook-batch-todo.json
+```
+
+Protocol: init once per batch, add-accounts when a profile's cards are
+enumerated, next before starting work, mark after each account reaches a
+terminal stage (`logged_out`, or `skipped` with `missing_password` /
+`mfa_required`). A profile is done only when the todo file says so.

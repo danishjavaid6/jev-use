@@ -67,7 +67,7 @@ test('real Node-to-Python launcher discovers browser and mobile tools outside pr
   const real = { command: process.execPath, args: [path.resolve(__dirname, '..', 'bin', 'jev-use-mcp.js')] };
   const result = await probe(real, { cwd: os.tmpdir() });
   assert.equal(result.ok, true, result.error);
-  assert.equal(result.tools.length, 16);
+  assert.equal(result.tools.length, 17);
   assert.ok(result.tools.includes('browser_facebook_run'));
   assert.ok(result.tools.includes('browser_facebook'));
   assert.ok(result.schemaProperties.browser_facebook.includes('restart_from_run'), 'fresh launcher must expose the recovery schema, not merely the tool name');
@@ -76,10 +76,11 @@ test('real Node-to-Python launcher discovers browser and mobile tools outside pr
   assert.ok(result.tools.includes('browser_action'));
   assert.ok(result.tools.includes('android_use'));
   assert.ok(result.tools.includes('android_facebook'));
+  assert.ok(result.tools.includes('android_facebook_flow'));
   if (process.platform === 'win32') {
     const registered = { command: commandcode.quoteWindows(real.command), args: real.args.map(commandcode.quoteWindows) };
     const shellResult = await probe(registered, { shell: true, cwd: os.tmpdir() });
     assert.equal(shellResult.ok, true, shellResult.error);
-    assert.equal(shellResult.tools.length, 16);
+    assert.equal(shellResult.tools.length, 17);
   }
 });

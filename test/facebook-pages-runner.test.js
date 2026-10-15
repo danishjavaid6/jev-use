@@ -33,7 +33,7 @@ function fixture({ withDialogs = false } = {}) {
       begin: () => record,
       navigate: async url => events.push(['goto',url]),
       settleAlerts: async options => { assert.equal(options.seconds,20); events.push(['settle']); },
-      browseFeed: async options => { assert.equal(options.seconds,180); record.browsed=true; events.push(['browse']); },
+      browseFeed: async options => { assert.equal(options.seconds,30); record.browsed=true; events.push(['browse']); },
       fillPage: async () => events.push(['fill']),
       beforeCreate: name => { record.pageName=name; record.stage='submission_reserved'; events.push(['reserve']); return record; },
       validateCreation: async () => events.push(['validate']),
@@ -50,13 +50,19 @@ test('prepares then confirms and logs out without retaining the password', async
   const f = fixture();
   assert.equal((await f.runner.prepare(config)).stage, 'submission_reserved');
   assert.equal(f.record.accountId,'account-123');
-  assert.deepEqual(f.events.map(event=>event[0]), ['login','settle','browse','goto','settle','fill','reserve']);
+  assert.deepEqual(f.events.map(event=>event[0]), ['login','browse','goto','fill','reserve']);
   assert.ok(!JSON.stringify(f.record).includes(config.password));
   assert.ok(!JSON.stringify(f.record).includes('never-return-this'));
   f.record.stage='submitting'; // Bridge journals and performs the one creation click.
   assert.equal((await f.runner.finish(config)).stage,'logged_out');
-  // finish confirms, browses home for 30s (no event), then logs out via chooser
-  assert.deepEqual(f.events.slice(-3).map(event=>event[0]),['confirm','goto','logout']);
+  assert.deepEqual(f.events.slice(-2).map(event=>event[0]),['confirm','logout']);
+});
+
+test('parses the primary location across Facebook text-layout variants', () => {
+  const f = fixture();
+  assert.equal(f.runner.parsePrimaryLocation('Your primary location is near:\nLahore, Punjab 54\nPrimary location is determined by information we use'), 'Lahore, Punjab 54');
+  assert.equal(f.runner.parsePrimaryLocation('Your primary location is near: Cebu City, Central Visayas'), 'Cebu City, Central Visayas');
+  assert.equal(f.runner.parsePrimaryLocation('Your primary location is near:\nLoading\u2026'), null);
 });
 
 test('an existing reservation validates without logging in, browsing or creating again', async () => {
@@ -102,17 +108,17 @@ test('slow remembered login waits for identity without repeated clicks or reload
   assert.equal(f.record.accountId,'account-123');
 });
 
-test('creation defaults to a 30-second home browse before logout', async () => {
+test('an explicit 30-second post-creation browse runs before logout', async () => {
   const f = fixture();
   f.record.stage='submitting'; f.setIdentity('account-123'); f.record.accountId='account-123'; f.record.browsed=true;
-  await f.runner.finish(config);
+  await f.runner.finish({...config, post_success_browse_seconds: 30});
   assert.deepEqual(f.events.map(event=>event[0]), ['confirm','goto','logout']);
 });
 
-test('a zero post-creation browse skips the home scroll', async () => {
+test('the default post-creation browse skips the home scroll', async () => {
   const f = fixture();
   f.record.stage='submitting'; f.setIdentity('account-123'); f.record.accountId='account-123'; f.record.browsed=true;
-  await f.runner.finish({...config, post_success_browse_seconds: 0});
+  await f.runner.finish(config);
   assert.ok(!f.events.some(event=>event[0]==='goto'));
   assert.equal(f.record.stage,'logged_out');
 });

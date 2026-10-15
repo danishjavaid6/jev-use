@@ -124,13 +124,14 @@ const workflow = {
   async dismissPagePrompts() {
     // Handle permission/notification banners rendered inside the page without
     // touching arbitrary content. Browser chrome prompts are handled by the
-    // bridge's native-dialog watcher.
-    const prompts = page.locator('[role="dialog"], [aria-modal="true"]');
+    // bridge's native-dialog watcher. Only dismissive controls are pressed;
+    // affirmative ones (Allow, Turn on) are never clicked.
+    const prompts = page.locator('[role="dialog"], [aria-modal="true"], [role="alertdialog"]');
     const count = await prompts.count().catch(() => 0);
     for (let index = 0; index < count; index++) {
       const prompt = prompts.nth(index);
       if (typeof prompt.isVisible !== 'function' || !await prompt.isVisible().catch(() => false)) continue;
-      for (const label of [/^(Close|Dismiss|Not now|No thanks|Block)$/i]) {
+      for (const label of [/^(Close|Dismiss|Not now|No thanks|Block|Maybe later)$/i]) {
         const button = prompt.getByRole('button', { name: label }).first();
         if (await button.isVisible().catch(() => false)) {
           await button.click({ timeout: 1500 }).catch(() => {});
