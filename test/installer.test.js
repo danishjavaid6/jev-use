@@ -179,6 +179,16 @@ test('doctor reports a live registration as ok', async () => {
   assert.ok(!/which is gone/.test(report), 'a path that exists is not reported as gone');
 });
 
+test('doctor identifies an existing registration to a different checkout', async () => {
+  fs.mkdirSync(path.join(dir, '.commandcode'), { recursive: true });
+  const other = path.join(dir, 'another-checkout', 'bin', 'jev-use-mcp.js');
+  fs.mkdirSync(path.dirname(other), { recursive: true });
+  fs.writeFileSync(other, '// older checkout');
+  commandcode.register({ command: process.execPath, args: [other] });
+  const report = await installer.doctor();
+  assert.match(report, /registered to another checkout/);
+});
+
 test('doctor checks launcher paths without treating a literal version argument as a file', async () => {
   fs.mkdirSync(path.join(dir, '.commandcode'), { recursive: true });
   commandcode.register({ command: process.execPath, args: [paths.mcpEntry(), 'facebook-actions-v2'] });

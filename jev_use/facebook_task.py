@@ -42,6 +42,35 @@ _PASSWORDS: dict[str, tuple[str, float]] = {}
 _TTL = 30 * 60
 
 
+def _matches(checkpoint: dict, account: dict) -> bool:
+    if checkpoint.get("accountId") and account.get("account_id"):
+        return checkpoint["accountId"] == account["account_id"]
+    return checkpoint["account"] in {account["account"], account.get("account_name")}
+
+
+def _completion(profile: dict, account: dict) -> dict | None:
+    matching = [c for c in profile["checkpoints"] if _matches(c, account)]
+    # A later unresolved reservation must not be hidden by an older success.
+    if any(c.get("stage") in {"submission_reserved", "submitting", "created"}
+           and not c.get("completed") for c in matching):
+        return None
+    completed = [c for c in matching if c.get("completed")]
+    return max(completed, key=lambda c: c.get("completedAt") or c.get("updatedAt") or 0, default=None)
+
+
+def _known_accounts(state: dict, profile: dict) -> list[dict]:
+    accounts = [a for a in state.get("saved_accounts", []) if a["profile_id"] == profile["id"]]
+    for c in profile["checkpoints"]:
+        if c["run_id"] == state["run_id"] and c["account"] != "__inventory__" and not any(a["account"] == c["account"] for a in accounts):
+            accounts.append({"account": c["account"], "account_id": c.get("accountId")})
+    return accounts
+
+
+def _verified_accounts(state: dict) -> list[tuple]:
+    return [(p, a, c) for p in state["profiles"] for a in _known_accounts(state, p)
+            if (c := _completion(p, a)) is not None]
+
+
 def forget(run_id: str) -> None:
     _PASSWORDS.pop(run_id, None)
 
@@ -72,7 +101,7 @@ def _payload(text: str) -> dict:
     return result
 
 
-def advance(args: dict, *, owner, open_profile, close_profile, action) -> dict:
+def advance(args: dict, *, owner, open_profile, close_profile, action, prepare_profile=None) -> dict:
     """Injected browser boundaries make restart/failure behavior replayable offline."""
     if set(args) - set(SCHEMA["inputSchema"]["properties"]):
         raise ValueError("Unsupported next-step argument")
@@ -87,27 +116,24 @@ def advance(args: dict, *, owner, open_profile, close_profile, action) -> dict:
         return {"status": "blocked", "reason": "another_controller_call_is_running"}
     try:
         return _advance(args, owner=owner, open_profile=open_profile,
-                        close_profile=close_profile, action=action)
+                        close_profile=close_profile, action=action, prepare_profile=prepare_profile)
     finally:
         _LOCK.release()
 
 
-def _advance(args, *, owner, open_profile, close_profile, action):
+def _advance(args, *, owner, open_profile, close_profile, action, prepare_profile=None):
     run_id = args["run_id"]
     state = runs.status(run_id)
 
     def reply(status, **fields):
-        verified = [(p, c) for p in state["profiles"] for c in p["checkpoints"]
-                    if c["run_id"] == run_id and c["account"] != "__inventory__" and c.get("completed")]
-        known = {(a["profile_id"], a["account"]) for a in state.get("saved_accounts", [])}
-        known.update((p["id"], c["account"]) for p in state["profiles"] for c in p["checkpoints"]
-                     if c["run_id"] == run_id and c["account"] != "__inventory__")
+        verified = _verified_accounts(state)
+        known = {(p["id"], a["account"]) for p in state["profiles"] for a in _known_accounts(state, p)}
         return {"status": status, "run_id": run_id, **fields,
                 "progress": {"accounts_observed": len(known), "accounts_completed": len(verified),
                              "profiles_completed": sum(bool(state.get("controller", {}).get(p["id"], {}).get("completed")) for p in state["profiles"])},
-                **({"results": [{"profile": p["name"], "account": c["account"],
+                **({"results": [{"profile": p["name"], "account": a["account"], "source_run": c["run_id"],
                                   "page_name": c.get("pageName"), "confirmation": c.get("confirmation"),
-                                  "elapsed_ms": c.get("elapsedMs")} for p, c in verified]}
+                                  "elapsed_ms": c.get("elapsedMs")} for p, a, c in verified]}
                    if status == "completed" else {}),
                 "next_call": {"tool": SCHEMA["name"], "arguments": {"run_id": run_id}}
                 if status == "continue" else None}
@@ -129,9 +155,8 @@ def _advance(args, *, owner, open_profile, close_profile, action):
     profile = profile or next(iter(unfinished), None)
     if profile is None:
         forget(run_id)
-        verified = {(p["id"], c["account"]) for p in profiles for c in p["checkpoints"]
-                    if c["run_id"] == run_id and c.get("completed")}
-        accounts = {(a["profile_id"], a["account"]) for a in state.get("saved_accounts", [])}
+        verified = {(p["id"], a["account"]) for p, a, _ in _verified_accounts(state)}
+        accounts = {(p["id"], a["account"]) for p in profiles for a in _known_accounts(state, p)}
         if not accounts or not accounts.issubset(verified) or any(
                 not any(profile_id == p["id"] for profile_id, _ in verified) for p in profiles):
             return reply("blocked", reason="completion_journals_missing_or_inconsistent")
@@ -150,19 +175,24 @@ def _advance(args, *, owner, open_profile, close_profile, action):
             return reply("blocked", **context, reason="profile_open_not_verified")
         return reply("continue", **context, performed="open_profile")
     port = current_owner.port
+    if prepare_profile is not None:
+        try:
+            prepared = prepare_profile(run_id, current_owner)
+        except Exception as exc:
+            reason = "another_worker_owns_run" if str(exc).startswith("another_worker_owns_run:") else "workflow_tab_unavailable"
+            return reply("blocked", **context, reason=reason,
+                         instruction="Inspect the original tab; never replace a pending creation tab.")
+        if prepared:
+            return reply("continue", **context, performed="prepare_workflow_tab")
     base = {"run_id": run_id, "port": port}
     checkpoints = [c for c in profile["checkpoints"] if c["run_id"] == run_id and c["account"] != "__inventory__"]
-    saved = [a for a in state.get("saved_accounts", []) if a["profile_id"] == profile_id]
-    # Restore unfinished journals first, even if inventory was never committed.
-    for checkpoint in checkpoints:
-        if not any(a["account"] == checkpoint["account"] for a in saved):
-            saved.append({"account": checkpoint["account"], "account_id": checkpoint.get("accountId")})
+    saved = _known_accounts(state, profile)
 
     def checkpoint_for(item):
         return next((c for c in checkpoints if c["account"] == item["account"]), {})
 
     def done(item):
-        return bool(checkpoint_for(item).get("completed"))
+        return _completion(profile, item) is not None
 
     pending = [a for a in saved if not done(a)]
     cursor = state.get("cursor") or {}
@@ -201,8 +231,7 @@ def _advance(args, *, owner, open_profile, close_profile, action):
     context["account"] = account["account"]
     current_checkpoint = checkpoint_for(account)
     # Cross-run publication must be reconciled explicitly, never bypassed.
-    history = [c for c in profile["checkpoints"] if c["run_id"] != run_id and
-               (c["account"] == account["account"] or account.get("account_id") and c.get("accountId") == account["account_id"])]
+    history = [c for c in profile["checkpoints"] if c["run_id"] != run_id and _matches(c, account)]
     if history and current_checkpoint.get("stage") not in {"submitting", "created", "logged_out"}:
         return reply("blocked", **context, reason="historical_account_requires_reconciliation")
     public = {key: account[key] for key in ("account_name", "account_id") if account.get(key)}
@@ -218,7 +247,7 @@ def _advance(args, *, owner, open_profile, close_profile, action):
     current = observed.get("current_state", {})
     next_action = observed.get("next_action")
     if current.get("accountMismatch") or next_action in {None, "inspect"} or stage == "mfa_required":
-        return reply("blocked", **context, reason="identity_challenge_or_unknown_state", stage=stage,
+        return reply("blocked", **context, reason=observed.get("blocker") or "identity_challenge_or_unknown_state", stage=stage,
                      current_state=current, diagnostic_tool="browser_facebook_vision")
     if stage == "logged_out":
         if not observed.get("confirmation"):
@@ -247,7 +276,7 @@ def _advance(args, *, owner, open_profile, close_profile, action):
         if missing:
             return reply("needs_input", **context, reason="page_details_required", required=missing)
         call.update({key: value for key, value in details.items() if value is not None})
-    allowed_actions = {"retry_login", "correct_password", "login", "wait_home", "browse", "open_form",
+    allowed_actions = {"reset_login_view", "retry_login", "correct_password", "login", "wait_home", "browse", "open_form",
                        "wait_form", "fill", "create", "confirm", "home", "browse_after", "logout"}
     if next_action not in allowed_actions:
         return reply("blocked", **context, reason="unsupported_next_action")
@@ -256,6 +285,8 @@ def _advance(args, *, owner, open_profile, close_profile, action):
     same = all(previous.get(key) == value for key, value in signature.items())
     if same and previous.get("count", 0) >= 2:
         return reply("blocked", **context, reason="repeated_action_failure", action=next_action,
+                     failure_code=observed.get("loginFailure", {}).get("code"),
+                     live_login=live,
                      diagnostic_tool="browser_facebook_vision")
     try:
         result = _payload(action({**call, "action": next_action}))

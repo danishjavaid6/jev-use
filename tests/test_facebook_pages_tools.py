@@ -14,6 +14,7 @@ def scoped_run(monkeypatch, tmp_path):
     token = facebook_runs.begin_action("run", "p23", "account", "status")
     facebook_runs.finish_action("run", token, True)
     monkeypatch.setitem(mcp_server._GOLOGIN, "session", SimpleNamespace(profile=profile, port=9222))
+    monkeypatch.setitem(mcp_server._GOLOGIN, "run_id", None)
     monkeypatch.setattr(mcp_server, "_FACEBOOK_RUN_ID", None)
 
 
@@ -100,3 +101,51 @@ def test_failed_structured_action_omits_unrelated_journals(monkeypatch):
     assert "workflowCheckpoints" not in payload
     assert payload["error"] == "button unavailable"
     assert payload["browserDialogs"]["inspected"]
+
+
+@pytest.mark.parametrize("handler,args", [
+    ("tool_browser_script", {"port": 9222, "code": "return 1;"}),
+    ("tool_browser_use", {"goal": "click create", "act": True}),
+    ("tool_browser_action", {"action": "click", "label": "Create Page"}),
+    ("tool_browser_read", {"url": "https://www.facebook.com/"}),
+    ("tool_browser_facebook", {**BASE, "action": "login", "password": "PRIVATE"}),
+])
+def test_controller_ownership_prevents_model_fallbacks(monkeypatch, handler, args):
+    monkeypatch.setitem(mcp_server._GOLOGIN, "controller_run_id", "run")
+    with pytest.raises(betterwright.BetterWrightError, match="next-step controller owns"):
+        getattr(mcp_server, handler)(args)
+
+
+def test_pause_then_close_records_saving_and_releases_worker(monkeypatch):
+    session = mcp_server._GOLOGIN["session"]
+    session.stop = lambda: None
+    monkeypatch.setitem(mcp_server._GOLOGIN, "run_id", "run")
+    monkeypatch.setitem(mcp_server._GOLOGIN, "controller_run_id", "run")
+    monkeypatch.setattr(betterwright, "close_sessions", lambda: None)
+    facebook_runs.claim_worker("run", mcp_server._FACEBOOK_WORKER_ID)
+    mcp_server.tool_browser_facebook_run({"action": "pause", "run_id": "run"})
+    assert mcp_server._FACEBOOK_RUN_ID is None
+    assert "saved back" in mcp_server.tool_browser_close({})
+    state = facebook_runs.status("run")
+    assert state["last_profile_event"]["event"] == "closed_saved"
+    assert "worker" not in state
+    assert "controller_run_id" not in mcp_server._GOLOGIN
+
+
+def test_rejected_profile_switch_does_not_claim_another_run(monkeypatch):
+    profile = mcp_server._GOLOGIN["session"].profile
+    facebook_runs.start("other-run", 23, 23, [profile])
+    monkeypatch.setitem(mcp_server._GOLOGIN, "run_id", "run")
+    monkeypatch.setattr(gologin, "find", lambda _: profile)
+    with pytest.raises(gologin.GoLoginError, match="switching Facebook runs"):
+        mcp_server._open_gologin(profile.id, {"run_id": "other-run"})
+    assert "worker" not in facebook_runs.status("other-run")
+
+
+def test_reused_generic_profile_binds_and_leases_authorized_run(monkeypatch):
+    profile = mcp_server._GOLOGIN["session"].profile
+    monkeypatch.setattr(gologin, "find", lambda _: profile)
+    monkeypatch.setattr(mcp_server, "cdp_alive", lambda _: True)
+    assert "already open" in mcp_server._open_gologin(profile.id, {"run_id": "run"})
+    assert mcp_server._GOLOGIN["run_id"] == "run"
+    assert facebook_runs.status("run")["worker"]["id"] == mcp_server._FACEBOOK_WORKER_ID

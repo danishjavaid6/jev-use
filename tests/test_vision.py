@@ -19,16 +19,31 @@ def test_capture_is_read_only_and_provider_failures_are_sanitized(monkeypatch):
     monkeypatch.setattr(mcp_server.facebook_runs, "status", lambda _: {"profiles": [{"id": "allowed"}]})
     monkeypatch.setitem(mcp_server._GOLOGIN, "session", SimpleNamespace(profile=SimpleNamespace(id="allowed"), port=9222))
     requests = []
+    monkeypatch.setattr(mcp_server.betterwright, "workflow_tab", lambda *a, **k: {"target_id": "owned-tab"})
     monkeypatch.setattr(mcp_server, "tool_browser_script", lambda args: requests.append(args) or 'port=9222\n{"result":{"path":"trusted.png"}}')
     def fail(_):
         raise RuntimeError("PRIVATE_API_KEY_AND_IMAGE_BYTES")
     monkeypatch.setattr(vision, "diagnose_file", fail)
     result = mcp_server.tool_browser_facebook_vision({"run_id": "run"})
     assert json.loads(result)["reason"] == "vision_unavailable"
+    assert json.loads(result)["phase"] == "analysis"
     assert "PRIVATE" not in result
     assert requests[0]["dismiss_overlays"] is False
     assert "click" not in requests[0]["code"]
     assert requests[0]["checkpoint_scope"] == "gologin:allowed"
+    assert requests[0]["page_target_id"] == "owned-tab"
+
+
+def test_vision_reports_tab_selection_failure_without_guessing_or_creating(monkeypatch):
+    monkeypatch.setattr(mcp_server.facebook_runs, "status", lambda _: {"profiles": [{"id": "allowed"}]})
+    monkeypatch.setitem(mcp_server._GOLOGIN, "session", SimpleNamespace(profile=SimpleNamespace(id="allowed"), port=9222))
+    def unavailable(*args, **kwargs):
+        assert not kwargs.get("create")
+        raise RuntimeError("PRIVATE_BACKEND_TRACE")
+    monkeypatch.setattr(mcp_server.betterwright, "workflow_tab", unavailable)
+    result = json.loads(mcp_server.tool_browser_facebook_vision({"run_id": "run"}))
+    assert result["phase"] == "tab_selection"
+    assert "PRIVATE" not in json.dumps(result)
 
 
 @pytest.fixture

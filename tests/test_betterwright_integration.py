@@ -19,6 +19,13 @@ HTML = b'''<button id="account" onclick="setTimeout(()=>document.getElementById(
 
 @pytest.mark.skipif(not os.environ.get('JEV_TEST_CHROME'), reason='set JEV_TEST_CHROME for actual SDK/CDP test')
 def test_persistent_sdk_login_alert_and_hard_timeout(monkeypatch):
+    original_run = betterwright.run_script
+    def scoped_run(*args, **kwargs):
+        # All calls represent one owned profile, including the MCP vision call.
+        # A bridge correctly refuses changing from a port-only journal mid-run.
+        kwargs.setdefault('checkpoint_scope', 'gologin:fixture-profile')
+        return original_run(*args, **kwargs)
+    monkeypatch.setattr(betterwright, 'run_script', scoped_run)
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             self.send_response(200)
@@ -49,6 +56,25 @@ def test_persistent_sdk_login_alert_and_hard_timeout(monkeypatch):
             runner = betterwright.run_script(port, 'return {version:facebookPages.version, identity:await facebookPages.activeAccountId()}', timeout=30)
             assert runner['ok'], str(runner.get('error'))
             assert runner['result'] == {'version':'2', 'identity':None}
+            # Exercise the actual SDK screenshot contract used by Jev vision.
+            # This catches capture failures that mocked provider tests cannot.
+            captured = betterwright.run_script(port, "return await screenshot({kind:'debug',name:'vision-fixture.png'});", timeout=30)
+            assert captured['ok'], captured
+            from pathlib import Path
+            assert Path(captured['result']['path']).read_bytes().startswith(b'\x89PNG\r\n\x1a\n')
+            if os.environ.get('JEV_TEST_VISION'):
+                # Optional full screenshot -> Jev request smoke, on fixture UI
+                # only. The API key is supplied through the test process env.
+                from types import SimpleNamespace
+                from jev_use import mcp_server
+                monkeypatch.setitem(mcp_server._GOLOGIN, 'session', SimpleNamespace(
+                    profile=SimpleNamespace(id='fixture-profile'), port=port))
+                monkeypatch.setattr(mcp_server.facebook_runs, 'status', lambda _: {
+                    'profiles': [{'id': 'fixture-profile'}]})
+                observed = json.loads(mcp_server.tool_browser_facebook_vision({'run_id': 'fixture'}))
+                assert observed['status'] == 'observed', observed
+                assert observed['actionable'] is False
+                assert observed['model'] == 'jev-1.14.0'
             pid = betterwright._BRIDGES[port][1].process.pid
             result = betterwright.run_script(port, "await page.getByRole('button',{name:'Test account',exact:true}).click(); await page.locator('#pass').fill('fixture-only'); await dialogs.acceptNext(); await page.getByRole('button',{name:'Log in',exact:true}).click(); await page.locator('#done').getByText('Logged in',{exact:true}).waitFor(); return state.marker", timeout=30)
             assert result['ok'], result

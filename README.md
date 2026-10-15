@@ -117,6 +117,17 @@ not authorize clicks or substitute for account identity/creation evidence.
 
 The lower-level `browser_facebook` actions below remain available for focused
 manual recovery and maintenance; smaller agents should use the next-step tool.
+The controller pins a dedicated tab instead of choosing among restored duplicate
+Facebook tabs. It persists that tab's identity and validates it against the live
+browser on reconnect. Lost creation tabs stop for inspection. A worker lease
+prevents two MCP processes from operating the same run, and raw/low-level
+mutations are refused while the controller owns the profile. Pause and save/close
+before deliberately switching to manual recovery.
+
+Vision reports whether failure occurred during tab selection, screenshot capture,
+or TypeSafe analysis. An opt-in integration test exercises actual Chrome capture
+and the live image API on isolated fixture UI (`JEV_TEST_CHROME` and
+`JEV_TEST_VISION=1`, with `TYPESAFE_API_KEY` in the test process environment).
 
 Use the [start/resume prompt](prompts/facebook-pages.md) for the full agent-driven
 batch. Before a new session, run `jev-use doctor`: when GoLogin is configured it

@@ -253,6 +253,56 @@ def guard_profile(run_id: str, profile_id: str) -> None:
         _guard(_load(run_id), profile_id)
 
 
+def _process_alive(pid: int) -> bool:
+    if type(pid) is not int or pid < 1:
+        return False
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.OpenProcess.restype = wintypes.HANDLE
+        handle = kernel.OpenProcess(0x1000, False, pid)
+        if not handle:
+            return ctypes.get_last_error() == 5  # Access denied is not proof of death.
+        try:
+            code = wintypes.DWORD()
+            kernel.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+            if not kernel.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return True
+            return code.value == 259  # STILL_ACTIVE
+        finally:
+            kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+            kernel.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+        return True
+    except PermissionError:
+        return True
+    except ProcessLookupError:
+        return False
+
+
+def claim_worker(run_id: str, worker_id: str) -> None:
+    """One live MCP process owns a run while operating its GoLogin profile."""
+    with _locked():
+        state = _load(run_id)
+        if state["status"] != "active":
+            raise ValueError("This run is paused; explicit resume is required before browser actions")
+        lease = state.get("worker")
+        if lease and lease["id"] != worker_id and _process_alive(lease["pid"]):
+            raise ValueError("another_worker_owns_run: close/save its owned profile before starting a second agent")
+        state["worker"] = {"id": worker_id, "pid": os.getpid()}
+        _save(state)
+
+
+def release_worker(run_id: str, worker_id: str) -> None:
+    with _locked():
+        state = _load(run_id)
+        if state.get("worker", {}).get("id") == worker_id:
+            state.pop("worker", None)
+            _save(state)
+
+
 def begin_action(run_id: str, profile_id: str, account: str, action: str, details: dict | None = None) -> str:
     with _locked():
         state = _load(run_id)
@@ -343,7 +393,7 @@ def record_profile(run_id: str, profile_id: str, port: int | None, event: str) -
 
 def task_progress(run_id: str, profile_id: str, *, inventoried: bool = False,
                   completed: bool = False, failure: dict | None = None,
-                  clear_failure: bool = False) -> None:
+                  clear_failure: bool = False, workflow_tab: dict | None = None) -> None:
     """Persist only controller facts, never secrets, tool payloads or exceptions."""
     with _locked():
         state = _load(run_id)
@@ -357,6 +407,8 @@ def task_progress(run_id: str, profile_id: str, *, inventoried: bool = False,
             progress.pop("failure", None)
         if failure is not None:
             progress["failure"] = {k: failure[k] for k in ("account", "action", "stage", "count")}
+        if workflow_tab is not None:
+            progress["workflow_tab"] = {k: workflow_tab[k] for k in ("browser_id", "target_id")}
         _save(state)
 
 

@@ -217,13 +217,23 @@ def test_concurrent_controller_calls_cannot_start_duplicate_actions(browser):
     assert browser.events == []
 
 
-def test_historical_creation_is_not_bypassed_by_a_new_status_checkpoint(browser):
+def test_verified_historical_creation_is_skipped_without_a_new_create_or_login(browser):
     ready(browser)
     browser.records[("id-29", "older-run", "Alice")] = {
         "stage": "logged_out", "accountId": "123", "confirmation": {"text": "Already created"}}
     browser.action({"run_id": "batch", "account": "Alice", "port": 9222, "action": "status"})
-    assert browser.step(password="PRIVATE")["reason"] == "historical_account_requires_reconciliation"
-    assert not any(e[1] == "login" for e in browser.events)
+    result = browser.step(password="PRIVATE")
+    assert result["account"] == "Bob" and result["performed"] == "login"
+    assert result["progress"]["accounts_completed"] == 1
+    assert not any(e[1] == "login" and e[2] == "Alice" for e in browser.events)
+
+
+def test_old_completed_account_never_hides_a_later_uncertain_submission():
+    profile = {"checkpoints": [
+        {"run_id": "old", "account": "Alice", "accountId": "123", "completed": True, "stage": "logged_out"},
+        {"run_id": "later", "account": "Alice", "accountId": "123", "completed": False, "stage": "submitting"}]}
+    assert task._completion(profile, {"account": "Alice", "account_id": "123"}) is None
+    assert not task._matches(profile["checkpoints"][0], {"account": "Alice", "account_id": "different"})
 
 
 def test_controller_completion_marker_without_journal_evidence_is_not_success(browser):
@@ -255,3 +265,16 @@ def test_failed_fill_reuses_durable_page_inputs_without_model_memory(browser):
     browser.fail = None
     assert browser.step()["performed"] == "fill"
     assert browser.records[("id-29", "batch", "Alice")]["pageName"] == "Keep this Page"
+
+
+def test_preparing_one_owned_tab_is_a_bounded_step_before_any_login(browser):
+    assert browser.step()["performed"] == "open_profile"
+    calls = []
+    def prepare(run_id, owner):
+        calls.append((run_id, owner.profile.id))
+        return True
+    result = task.advance({"run_id": "batch"}, owner=lambda: browser.session, open_profile=browser.open,
+                          close_profile=browser.close, action=browser.action, prepare_profile=prepare)
+    assert result["performed"] == "prepare_workflow_tab"
+    assert calls == [("batch", "id-29")]
+    assert browser.events == [("id-29", "open")]

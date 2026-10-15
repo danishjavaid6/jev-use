@@ -1,7 +1,7 @@
 """Structured, agent-driven Facebook actions backed by the persistent bridge."""
 import json
 
-ACTIONS = ["tabs", "accounts", "status", "retry_login", "correct_password", "login", "wait_home", "browse", "open_form",
+ACTIONS = ["tabs", "accounts", "status", "reset_login_view", "retry_login", "correct_password", "login", "wait_home", "browse", "open_form",
            "wait_form", "fill", "create", "confirm", "home", "browse_after", "logout"]
 SCHEMA = {
     "name": "browser_facebook",

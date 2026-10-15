@@ -113,6 +113,8 @@ const facebookAgent = {
       const passwordPromptVisible = await page.locator('input[name="pass"]').first().isVisible().catch(() => false);
       const chooserVisible = await page.getByText(/^Log into Facebook$/i).first().isVisible().catch(() => false);
       const passwordRejected = await page.getByText('The password you entered is incorrect.', { exact: true }).first().isVisible().catch(() => false);
+      const passwordAccountMatches = passwordPromptVisible && typeof facebookPages.passwordAccountMatches === 'function'
+        ? await facebookPages.passwordAccountMatches(options) : null;
       const identity = await facebookPages.activeAccountId();
       const expectedIdentity = checkpoint.accountId || options.account_id;
       // A response can be lost after login commits but before stage changes.
@@ -134,13 +136,30 @@ const facebookAgent = {
       if (accountMismatch) nextAction = 'inspect';
       else if (pendingRecovery && pendingRecovery.completedAt == null) nextAction = passwordRejected ? 'inspect' : 'login';
       else if (pendingRecovery?.completedAt != null && pendingRecovery.settledAt == null) nextAction = 'wait_home';
-      else if (kind === 'account_chooser' && checkpoint.accountId && ['signed_in', 'home_ready', 'browsed', 'form_open', 'form_ready'].includes(checkpoint.stage) && !checkpoint.pageName) nextAction = 'login';
+      else if (kind === 'account_chooser' && checkpoint.accountId && ['signed_in', 'home_ready', 'browsed', 'form_open', 'form_ready'].includes(checkpoint.stage)) nextAction = 'login';
       else if (identity && kind !== 'creation_form' && ['form_open', 'form_ready'].includes(checkpoint.stage)) nextAction = 'open_form';
       else if (kind === 'creation_form' && ['signed_in', 'home_ready', 'browsed'].includes(checkpoint.stage)) nextAction = 'home';
+      let blocker = null;
+      if (!identity && passwordPromptVisible && passwordAccountMatches === false) {
+        nextAction = checkpoint.stage === 'started' && !checkpoint.loginSubmitted && !checkpoint.loginViewRecovery ? 'reset_login_view' : 'inspect';
+        blocker = 'wrong_or_unverified_password_form';
+      }
       return { ...result(), next_action: nextAction,
         current_state: { kind, url: url.origin + url.pathname, accountMismatch, account_id: identity || null,
           identityMatches: expectedIdentity ? identity === expectedIdentity : null },
-        live_login: { identityPresent: Boolean(identity), passwordPromptVisible, chooserVisible, passwordRejected } };
+        blocker, live_login: { identityPresent: Boolean(identity), passwordPromptVisible, chooserVisible, passwordRejected, passwordAccountMatches } };
+    }
+    if (action === 'reset_login_view') {
+      if (checkpoint.stage !== 'started' || checkpoint.loginSubmitted || checkpoint.loginViewRecovery ||
+          await facebookPages.activeAccountId() ||
+          !await page.locator('input[name="pass"]').first().isVisible() ||
+          await facebookPages.passwordAccountMatches(options)) {
+        throw new Error('Login view recovery requires a verified mismatched form with no submitted password; inspect instead');
+      }
+      checkpoint.loginViewRecovery = { at: Date.now(), reason: 'mismatched unsubmitted password form' };
+      await workflow.navigate('https://www.facebook.com/login/');
+      checkpoint.loginCardClicked = false;
+      return result();
     }
     if (action === 'correct_password') {
       const fail = (code, message) => {
@@ -246,7 +265,7 @@ const facebookAgent = {
       checkpoint.recoveries.push({ action: 'home', at: Date.now() });
       return result();
     }
-    const resumeLogin = action === 'login' && checkpoint.accountId && ['signed_in', 'home_ready', 'browsed', 'form_open', 'form_ready'].includes(checkpoint.stage) && !checkpoint.pageName;
+    const resumeLogin = action === 'login' && checkpoint.accountId && ['signed_in', 'home_ready', 'browsed', 'form_open', 'form_ready'].includes(checkpoint.stage);
     if (resumeLogin) {
       const activeIdentity = await facebookPages.activeAccountId();
       const pendingRecovery = checkpoint.loginRecoveries?.at(-1);
@@ -289,12 +308,22 @@ const facebookAgent = {
       }
       for (const other of Object.values(state.jevWorkflow)) {
         if (other !== checkpoint && other.accountId && other.stage !== 'logged_out') {
+          // A historical journal is not evidence that its account is still
+          // signed in. Preserve its reservation, but do not prevent another
+          // verified account from starting on a live signed-out chooser.
+          const differentHistoricalAccount = other.runId && other.runId !== run_id &&
+            options.account_id && other.accountId !== options.account_id &&
+            other.account !== account && other.account !== options.account_name;
+          if (differentHistoricalAccount && !await facebookPages.activeAccountId() &&
+              await page.getByText(/^Log into Facebook$/i).first().isVisible() &&
+              !await page.locator('input[name="pass"]').first().isVisible()) continue;
           const successor = other.restartReconciledBy && Object.values(state.jevWorkflow).find(record =>
             record.runId === other.restartReconciledBy.runId && record.account === other.restartReconciledBy.account &&
             record.restartFromRun === other.runId && record.accountId === other.accountId && record.stage === 'logged_out');
           if (successor && ['started', 'signed_in', 'home_ready', 'browsed', 'form_open', 'form_ready'].includes(other.stage) && !other.pageName) continue;
           if (other === historical && checkpoint.restartFromRun === other.runId &&
             ['started', 'signed_in', 'home_ready', 'browsed', 'form_open', 'form_ready'].includes(other.stage) && !other.pageName) continue;
+          checkpoint.loginFailure = { code: 'unfinished_account_requires_reconciliation', at: Date.now() };
           throw new Error('Finish the previous account and verify logout first');
         }
       }

@@ -26,6 +26,12 @@ not start publication. Do not launch a script/holder process or another worker.
    checks and ONE bounded workflow action per call. Do not choose ports, account
    keys, action sequences, or tabs yourself in this mode.
 
+The controller creates one dedicated Facebook tab and retains its exact target
+ID. Other restored Facebook tabs are left untouched. Do not override that tab
+or attach by URL. A lost tab with a reserved/pending creation requires inspection,
+not a replacement tab or another Create click. One live MCP worker owns the run
+until its profile is closed/saved; another worker receives a blocker.
+
 ## The small-agent loop
 
 | Returned status | Agent action |
@@ -55,6 +61,9 @@ A submitted action may already have committed: preserve state for inspection on
 resume. Only one worker may own a run. If the agent/connection dies, resume from
 saved state rather than starting over. Historical accounts needing reconciliation
 remain blocked instead of silently repeating Page creation.
+An older reservation for a different account stays protected, while a verified
+signed-out chooser can start another observed account with a different public ID.
+An unfinished account in the current run still requires reconciliation first.
 
 ## What the tool executes
 
@@ -75,6 +84,16 @@ A blocked account means the job is unfinished. Report the profile/account,
 reason, verified successes, pending work and actual timings. Never call a filled
 form or created Page with pending logout complete. Repeated failures stop after
 two attempts; repairing a blocker may require a focused structured action.
+While the controller owns a profile, raw browser actions and lower-level
+mutations are refused. For explicitly requested manual recovery, pause and
+close/save first, then resume the authorized run and reopen with `browser_open`
+for the documented structured recovery action. Never do this as an automatic
+fallback after a blocker.
+
+An unmatched password form can return `reset_login_view`. The backend returns
+to the chooser once only when no password was submitted. Submitted login and
+creation attempts keep their original guards. Vision failures report `phase`
+(`tab_selection`, `capture`, or `analysis`) so report the actual failing stage.
 
 For maintenance or a focused manual recovery, read
 [structured actions](references/structured-actions.md). For an explicitly
