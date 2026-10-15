@@ -12,6 +12,12 @@ Read browser_facebook_run status. For this authorized continuation, resume its
 saved run if needed. For a new job, start a stable run with exactly the profiles
 I selected: one profile, numeric range, explicit list, or observed named IDs.
 Never let a saved cursor override a new selection. Preserve prior journals.
+For a new request to create more Pages, use a new stable run ID even if the
+profiles/accounts are unchanged. Create one additional Page per account in that
+job; skip only this job's completed accounts. Earlier Pages and unresolved
+requests stay in history and never count as completion of the new request.
+"Resume" uses the same run ID and must not create an extra Page for a completed
+account or repeat an uncertain submission.
 
 Call browser_facebook_next with that run_id. When status is continue, execute
 its exact next_call. When needs_input, supply the requested fields for the

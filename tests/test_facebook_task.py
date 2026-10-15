@@ -217,22 +217,24 @@ def test_concurrent_controller_calls_cannot_start_duplicate_actions(browser):
     assert browser.events == []
 
 
-def test_verified_historical_creation_is_skipped_without_a_new_create_or_login(browser):
+def test_verified_historical_creation_does_not_complete_a_new_request(browser):
     ready(browser)
     browser.records[("id-29", "older-run", "Alice")] = {
         "stage": "logged_out", "accountId": "123", "confirmation": {"text": "Already created"}}
     browser.action({"run_id": "batch", "account": "Alice", "port": 9222, "action": "status"})
     result = browser.step(password="PRIVATE")
-    assert result["account"] == "Bob" and result["performed"] == "login"
-    assert result["progress"]["accounts_completed"] == 1
-    assert not any(e[1] == "login" and e[2] == "Alice" for e in browser.events)
+    assert result["account"] == "Alice" and result["performed"] == "login"
+    assert result["progress"]["accounts_completed"] == 0
+    assert result["history"]["previous_pages_created"] == 1
+    assert browser.records[("id-29", "older-run", "Alice")]["confirmation"]["text"] == "Already created"
 
 
 def test_old_completed_account_never_hides_a_later_uncertain_submission():
     profile = {"checkpoints": [
         {"run_id": "old", "account": "Alice", "accountId": "123", "completed": True, "stage": "logged_out"},
         {"run_id": "later", "account": "Alice", "accountId": "123", "completed": False, "stage": "submitting"}]}
-    assert task._completion(profile, {"account": "Alice", "account_id": "123"}) is None
+    assert task._completion(profile, {"account": "Alice", "account_id": "123"}, "later") is None
+    assert task._completion(profile, {"account": "Alice", "account_id": "123"}, "old")["completed"]
     assert not task._matches(profile["checkpoints"][0], {"account": "Alice", "account_id": "different"})
 
 
@@ -278,3 +280,50 @@ def test_preparing_one_owned_tab_is_a_bounded_step_before_any_login(browser):
     assert result["performed"] == "prepare_workflow_tab"
     assert calls == [("batch", "id-29")]
     assert browser.events == [("id-29", "open")]
+
+
+def finish_job(browser, run_id):
+    result = browser.step(run_id=run_id, password="PRIVATE")
+    for _ in range(100):
+        if result["status"] == "completed":
+            return result
+        assert result["status"] in {"continue", "needs_input"}, result
+        fields = {"page_name": run_id + " " + result["account"], "category": "Artist"} if result["status"] == "needs_input" else {}
+        result = browser.step(run_id=run_id, **fields)
+    pytest.fail("Workflow did not complete within bounded replay")
+
+
+def test_two_requests_create_multiple_pages_per_account_but_resume_never_creates_extras(browser):
+    first = finish_job(browser, "batch")
+    assert first["progress"]["accounts_completed"] == 4
+    original = json.loads(json.dumps({str(k): v for k, v in browser.records.items()}))
+    events_before = len(browser.events)
+    profiles = [gologin.GoLoginProfile("id-29", "Profile 29")]
+    runs.start("additional", 29, 29, profiles)
+    second = finish_job(browser, "additional")
+    assert second["progress"]["accounts_completed"] == 2
+    assert {r["source_run"] for r in second["results"]} == {"additional"}
+    assert second["history"]["previous_pages_created"] == 2
+    assert {e[0] for e in browser.events[events_before:]} == {"id-29"}
+    assert len([e for e in browser.events if e[1] == "create"]) == 6
+    assert all(browser.records[k] == original[str(k)] for k in browser.records if k[1] == "batch")
+    assert browser.records[("id-29", "batch", "Alice")]["pageName"] != browser.records[("id-29", "additional", "Alice")]["pageName"]
+    runs.start("additional", 29, 29, profiles)  # Same request, not another Page.
+    runs.transition("additional", "pause")
+    runs.transition("additional", "resume")
+    before = len(browser.events)
+    assert browser.step(run_id="additional")["status"] == "completed"
+    assert len(browser.events) == before
+
+
+@pytest.mark.parametrize("stage", ["started", "form_ready", "submission_reserved", "submitting", "created"])
+def test_new_request_preserves_all_old_attempts_without_retrying_them(browser, stage):
+    ready(browser)
+    old = {"stage": stage, "accountId": "123", "pageName": "Older Page"}
+    browser.records[("id-29", "old", "Alice")] = old.copy()
+    browser.action({"run_id": "batch", "account": "Alice", "port": 9222, "action": "status"})
+    result = browser.step(password="PRIVATE")
+    assert result["performed"] == "login" and result["account"] == "Alice"
+    assert result["history"]["previous_unresolved_creations"] == int(stage in {"submission_reserved", "submitting", "created"})
+    assert browser.records[("id-29", "old", "Alice")] == old
+    assert not any(e[1] in {"create", "confirm"} for e in browser.events)

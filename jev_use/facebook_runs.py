@@ -15,7 +15,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 SCHEMA = {
     "name": "browser_facebook_run",
-    "description": "Persist exactly the profiles selected by the user and their resume context. start accepts a numeric range, profile_numbers list (one item for a single profile), or observed profile_ids. No profiles are selected by default. status reads progress; resume continues that saved selection; pause stops new actions. Never supply passwords here.",
+    "description": "Persist exactly the profiles selected by the user and their resume context. A new authorized run_id requests one additional Page per observed account, even when previous jobs created Pages there. Reusing a run_id or resume continues its existing request without creating extras. start accepts a numeric range, profile_numbers list (one item for a single profile), or observed profile_ids. No profiles are selected by default. status reads progress; pause stops new actions. Never supply passwords here.",
     "inputSchema": {
         "type": "object", "additionalProperties": False,
         "properties": {
@@ -160,6 +160,7 @@ def start(run_id: str, first: int | None, last: int | None, profiles: list, *,
                 raise ValueError("Run scope is immutable; do not change the range or profile IDs under an existing run_id")
             return _view(state)
         state = {"schema_version": 1, "run_id": run_id, "status": "active",
+                 "page_goal": "one_new_page_per_account",
                  "profile_start": first, "profile_end": last, "profiles": selected,
                  "selection": selection,
                  "created_at": time.time(), "cursor": None, "pending_action": None,
@@ -206,6 +207,7 @@ def _checkpoint_summary(run_id: str, account: str, value: dict) -> dict:
 
 def _view(state: dict) -> dict:
     view = json.loads(json.dumps(state))
+    view.setdefault("page_goal", "one_new_page_per_account")
     for profile in view["profiles"]:
         profile["checkpoints"] = []
         for key, value in _journals(profile["id"]).items():
@@ -215,7 +217,7 @@ def _view(state: dict) -> dict:
             cursor = view.get("cursor")
             if cursor and cursor["profile_id"] == profile["id"] and account == cursor["account"] and run_id == state["run_id"]:
                 cursor.update(summary)
-    view["instruction"] = "Stay within these exact profile IDs. Read current browser status before resuming; saved checkpoints describe prior observations, not guaranteed live UI. Never repeat uncertain creation."
+    view["instruction"] = "Stay within these exact profile IDs. This run requests one new Page per observed account; Pages from other runs are retained history, not completion of this run. Resume uses this run's existing checkpoints and must never repeat its uncertain creation. Inspect live state before acting."
     view["resume_action"] = "resume" if state["status"] == "paused" or state.get("pending_action") else "status"
     if state["status"] == "paused" or state.get("pending_action"):
         view["requires_observation"] = True

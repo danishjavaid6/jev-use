@@ -233,6 +233,29 @@ test('another historical reservation allows only a verified different account on
   }
 });
 
+test('a scoped new Page request allows the same account while preserving older journals', async () => {
+  for (const stage of ['started', 'form_ready', 'submission_reserved', 'submitting', 'created', 'logged_out']) {
+    for (const hasId of [false, true]) {
+      const f = fixture(); f.setIdentity(null);
+      const old = { runId: 'old', account: 'account1', stage, pageName: 'Previous Page', ...(hasId ? {accountId: 'requested'} : {}) };
+      const original = JSON.stringify(old);
+      f.context.state.jevWorkflow.old = old;
+      await f.step('login', { account_id: 'requested', new_page_per_account: true });
+      assert.equal(f.events.filter(e => e[0] === 'login').length, 1);
+      assert.equal(JSON.stringify(old), original);
+    }
+  }
+});
+
+test('a new Page request cannot switch unfinished accounts in the same run even without an ID', async () => {
+  for (const hasId of [false, true]) {
+    const f = fixture(); f.setIdentity(null);
+    f.context.state.jevWorkflow.other = { runId: 'stable-run', account: 'other', stage: 'submitting', ...(hasId ? {accountId: 'other'} : {}) };
+    await assert.rejects(f.step('login', { new_page_per_account: true }), /previous account/);
+    assert.equal(f.events.some(e => e[0] === 'login'), false);
+  }
+});
+
 test('a failed scroll does not count unperformed browsing time', async () => {
   const f = fixture();
   await f.step('login');

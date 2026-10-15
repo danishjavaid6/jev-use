@@ -30,6 +30,7 @@ def observed(account="Alice"):
 
 def test_exact_range_survives_new_python_process_and_cannot_expand():
     state = runs.start("batch", 23, 29, profiles())
+    assert state["page_goal"] == "one_new_page_per_account"
     assert [p["number"] for p in state["profiles"]] == list(range(23, 30))
     code = "from jev_use.facebook_runs import status; import json; print(json.dumps(status()))"
     saved = json.loads(subprocess.check_output([sys.executable, "-c", code], text=True))

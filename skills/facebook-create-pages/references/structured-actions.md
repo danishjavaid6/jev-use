@@ -72,7 +72,10 @@ The exact IDs in `profiles` are the allowed set, including for sparse lists.
 Missing or duplicate profiles are errors; never substitute the first available
 profile. The saved selection and exact IDs are immutable for that run. If the user
 requests a different selection, use a separate scoped job and retain old journals;
-do not enlarge the old job or treat the new ID as permission to repeat creation.
+do not enlarge the old job. A new user request to create additional Pages uses a
+new stable job ID even for the same profiles/accounts. Each job creates one new
+Page per observed account; old successes do not complete the new request.
+Never change IDs merely to retry an uncertain submission in an existing job.
 Never interpret "23 to 29" as all profiles or continue with 30 after 29.
 
 For an authorized continuation of a paused/interrupted run, call `resume` with
@@ -80,8 +83,11 @@ its saved `run_id`, then open its allowed profile and inspect account `status`
 before taking the next action. Inspect the saved cursor account first when it
 has unfinished work; then process remaining eligible accounts within the saved
 range. Retain blocked/deferred work, rather than silently forgetting it when
-advancing profiles. Completed accounts are skipped. Historical `submitting`
-checkpoints permit confirmation only, even when they belong to another run.
+advancing profiles. Accounts completed in this job are skipped. A `submitting`
+checkpoint in this job permits confirmation only. A separately authorized new
+job leaves older attempts untouched and creates its own additional Page; it does
+not retry, delete or mark those older attempts complete. Keep Page details stable
+per job and all prior records available for audit.
 
 Each structured action saves its intent before execution and its result after
 execution. If the agent/connection dies, `pending_action` remains. Treat this

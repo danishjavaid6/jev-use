@@ -106,7 +106,18 @@ Page details are durable; credentials must be resupplied after restart.
 `needs_resume` requires reading run status and an authorized `resume`.
 `paused` and `blocked` stop the loop; `completed` requires all observed accounts'
 creation evidence, verified logout and profile closure. Repeated failures stop
-after two attempts. The tool never bypasses historical creation guards.
+after two attempts. Submission guards apply to each job's own Page attempt.
+
+Each new authorized job requests **one additional Page per observed account**
+in exactly the user's selected profiles. Accounts may already have Pages from
+earlier jobs; that history does not complete or block the new request. To create
+another Page in the same accounts, start a new stable `run_id`. To resume an
+interrupted job, retain its existing ID: completed accounts in that job are
+skipped and uncertain submissions are confirmed rather than clicked again.
+Every job keeps separate Page details, confirmation, timing and logout records.
+Older unresolved attempts remain visible in history without being retried or
+silently marked successful. Current progress/results count only this job;
+`history` reports previous confirmed Pages and unresolved creation attempts.
 
 `browser_facebook_vision(run_id="my-batch")` adds experimental, read-only Jev
 1.14 screen classification, popup presence and a possible Close-button box.

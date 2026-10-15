@@ -13,8 +13,11 @@ not start publication. Do not launch a script/holder process or another worker.
    upgrading; a fresh doctor probe does not update a cached connection. Required
    tools: `browser_facebook_run`, `browser_facebook_next`.
 2. Read `browser_facebook_run(action="status")` to recover prior scope and progress.
-   For an authorized continuation, use the saved `run_id`; call `resume` if paused
-   or interrupted. Never resume publication for a maintenance-only instruction.
+   Distinguish a continuation from a new request for additional Pages. "Resume"
+   uses the saved `run_id`; "create again" or "create more" starts a new job,
+   even when the selected profiles/accounts are the same. A fresh job requests
+   one additional Page in each observed account. Never start publication for a
+   maintenance-only instruction.
 3. For a new job, call `browser_facebook_run(action="start", run_id=STABLE_ID, ...)`
    with exactly ONE user-selected mode: `profile_numbers=[7]` for one profile,
    `profile_numbers=[2,7,19]` for a list, `profile_start=23, profile_end=29` for a
@@ -25,6 +28,15 @@ not start publication. Do not launch a script/holder process or another worker.
    owns opening/closing GoLogin, observed account selection, live status, popup
    checks and ONE bounded workflow action per call. Do not choose ports, account
    keys, action sequences, or tabs yourself in this mode.
+
+Records belong to `(profile, run_id, account)`. Skip only accounts completed in
+the current job. Prior Pages never satisfy a new request: the same account can
+create another Page in another authorized job. Keep one stable run ID through
+all retries of a job; never invent new IDs to retry its uncertain Create click.
+Older unfinished requests remain recorded separately and are not replayed,
+marked complete, or deleted when another Page is requested. The response's
+`history` counts them separately from current-job progress. Page details stay
+stable within a job; choose the user's new Page details for the next request.
 
 The controller creates one dedicated Facebook tab and retains its exact target
 ID. Other restored Facebook tabs are left untouched. Do not override that tab
@@ -59,11 +71,11 @@ after a failed fill or uncertain submission.
 On stop, call `browser_facebook_run(action="pause", run_id=RUN)` and cease calls.
 A submitted action may already have committed: preserve state for inspection on
 resume. Only one worker may own a run. If the agent/connection dies, resume from
-saved state rather than starting over. Historical accounts needing reconciliation
-remain blocked instead of silently repeating Page creation.
-An older reservation for a different account stays protected, while a verified
-signed-out chooser can start another observed account with a different public ID.
-An unfinished account in the current run still requires reconciliation first.
+saved state rather than starting over. An uncertain submission in this job
+must be inspected/confirmed, never clicked again. A separately authorized new
+job creates an additional Page without changing an older job's reservation.
+An unfinished account in the current run still requires reconciliation before
+switching to another account.
 
 ## What the tool executes
 

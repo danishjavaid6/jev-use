@@ -307,7 +307,11 @@ const facebookAgent = {
         historical.restartReconciledBy = { runId: run_id, account };
       }
       for (const other of Object.values(state.jevWorkflow)) {
-        if (other !== checkpoint && other.accountId && other.stage !== 'logged_out') {
+        if (other !== checkpoint && (other.accountId || ['submission_reserved', 'submitting', 'created'].includes(other.stage)) && other.stage !== 'logged_out') {
+          // The MCP boundary verified this distinct run's scope. Older Page
+          // requests remain untouched, including their uncertain submissions.
+          // Current-run journals still forbid switching unfinished accounts.
+          if (options.new_page_per_account === true && other.runId && other.runId !== run_id) continue;
           // A historical journal is not evidence that its account is still
           // signed in. Preserve its reservation, but do not prevent another
           // verified account from starting on a live signed-out chooser.

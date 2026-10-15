@@ -1304,7 +1304,7 @@ def tool_browser_facebook(args: dict[str, Any]) -> str:
                 args[key] = int(args[key])
             except ValueError:
                 pass
-    options = facebook_pages.request(args)
+    options = facebook_pages.request(args, new_page_per_account=True)
     owner = _GOLOGIN.get("session")
     if owner is None or owner.port != args["port"]:
         raise ValueError("Open the requested GoLogin profile on this MCP connection first; a port alone does not verify run scope")

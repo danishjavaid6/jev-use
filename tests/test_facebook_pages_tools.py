@@ -50,6 +50,16 @@ def test_data_cannot_become_executable_code():
     assert json.loads(payload)["page_name"] == name
 
 
+def test_additional_page_marker_is_only_set_by_the_scoped_mcp_boundary(monkeypatch):
+    with pytest.raises(ValueError, match="Unsupported Facebook arguments"):
+        facebook_pages.request({**BASE, "action": "login", "new_page_per_account": True})
+    captured = []
+    monkeypatch.setattr(mcp_server, "tool_browser_script", lambda options: captured.append(options) or "ok")
+    mcp_server.tool_browser_facebook({**BASE, "action": "status"})
+    data = json.loads(captured[0]["code"].removeprefix("return await facebookAgent.step(").removesuffix(");"))
+    assert data["new_page_per_account"] is True
+
+
 def test_browsing_defaults_to_one_minute_without_extending_fixed_waits():
     for action in ("browse", "browse_after"):
         code = facebook_pages.request({**BASE, "action": action})["code"]

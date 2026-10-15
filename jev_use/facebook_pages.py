@@ -38,7 +38,7 @@ SCHEMA = {
 }
 
 
-def request(args):
+def request(args, *, new_page_per_account=False):
     """Validate before touching the browser; data is JSON, never executable input."""
     unknown = set(args) - set(SCHEMA["inputSchema"]["properties"])
     if unknown:
@@ -66,6 +66,9 @@ def request(args):
         raise ValueError("correct_password requires the user's corrected runtime password")
     options = {key: args[key] for key in ("port", "page_url", "page_target_id", "checkpoint_scope") if key in args}
     data = {key: value for key, value in args.items() if key not in options}
+    if new_page_per_account:
+        # Internal marker from the scoped MCP boundary, never a caller argument.
+        data["new_page_per_account"] = True
     if args["action"] in {"browse", "browse_after"}:
         data.setdefault("seconds", seconds)
     options.update(timeout=90, facebook_workflow=True, code="return await facebookAgent.step(" + json.dumps(data) + ");")

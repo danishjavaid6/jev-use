@@ -21,6 +21,8 @@ SCHEMA = {
         "completed=verified creation AND logout for every inventoried account, profiles saved. "
         "Runtime password is retained only in this MCP process for this run; never saved. "
         "Page details apply to the returned current account; supply only when requested. "
+        "Each new user-authorized run creates one additional Page per observed account; "
+        "only completion in THIS run is skipped. Resume retains this run's creation guards. "
         "Never run alongside another worker or use raw scripts to escape a blocker."
     ),
     "inputSchema": {
@@ -48,9 +50,9 @@ def _matches(checkpoint: dict, account: dict) -> bool:
     return checkpoint["account"] in {account["account"], account.get("account_name")}
 
 
-def _completion(profile: dict, account: dict) -> dict | None:
-    matching = [c for c in profile["checkpoints"] if _matches(c, account)]
-    # A later unresolved reservation must not be hidden by an older success.
+def _completion(profile: dict, account: dict, run_id: str) -> dict | None:
+    matching = [c for c in profile["checkpoints"] if c["run_id"] == run_id and _matches(c, account)]
+    # A different job's Page is history, not completion of this request.
     if any(c.get("stage") in {"submission_reserved", "submitting", "created"}
            and not c.get("completed") for c in matching):
         return None
@@ -68,7 +70,7 @@ def _known_accounts(state: dict, profile: dict) -> list[dict]:
 
 def _verified_accounts(state: dict) -> list[tuple]:
     return [(p, a, c) for p in state["profiles"] for a in _known_accounts(state, p)
-            if (c := _completion(p, a)) is not None]
+            if (c := _completion(p, a, state["run_id"])) is not None]
 
 
 def forget(run_id: str) -> None:
@@ -128,7 +130,12 @@ def _advance(args, *, owner, open_profile, close_profile, action, prepare_profil
     def reply(status, **fields):
         verified = _verified_accounts(state)
         known = {(p["id"], a["account"]) for p in state["profiles"] for a in _known_accounts(state, p)}
+        history = [c for p in state["profiles"] for c in p["checkpoints"] if c["run_id"] != run_id]
         return {"status": status, "run_id": run_id, **fields,
+                "page_goal": "one_new_page_per_account",
+                "history": {"previous_pages_created": sum(bool(c.get("completed")) for c in history),
+                            "previous_unresolved_creations": sum(c.get("stage") in {"submission_reserved", "submitting", "created"}
+                                                                 and not c.get("completed") for c in history)},
                 "progress": {"accounts_observed": len(known), "accounts_completed": len(verified),
                              "profiles_completed": sum(bool(state.get("controller", {}).get(p["id"], {}).get("completed")) for p in state["profiles"])},
                 **({"results": [{"profile": p["name"], "account": a["account"], "source_run": c["run_id"],
@@ -192,7 +199,7 @@ def _advance(args, *, owner, open_profile, close_profile, action, prepare_profil
         return next((c for c in checkpoints if c["account"] == item["account"]), {})
 
     def done(item):
-        return _completion(profile, item) is not None
+        return _completion(profile, item, run_id) is not None
 
     pending = [a for a in saved if not done(a)]
     cursor = state.get("cursor") or {}
@@ -230,10 +237,8 @@ def _advance(args, *, owner, open_profile, close_profile, action, prepare_profil
             return reply("blocked", **context, reason="profile_close_or_chooser_verification_failed")
     context["account"] = account["account"]
     current_checkpoint = checkpoint_for(account)
-    # Cross-run publication must be reconciled explicitly, never bypassed.
-    history = [c for c in profile["checkpoints"] if c["run_id"] != run_id and _matches(c, account)]
-    if history and current_checkpoint.get("stage") not in {"submitting", "created", "logged_out"}:
-        return reply("blocked", **context, reason="historical_account_requires_reconciliation")
+    # A new job is a separate Page request. Never reuse or change an older
+    # reservation; a resumed current job still follows its own live journal.
     public = {key: account[key] for key in ("account_name", "account_id") if account.get(key)}
     if current_checkpoint.get("accountId"):
         public["account_id"] = current_checkpoint["accountId"]
