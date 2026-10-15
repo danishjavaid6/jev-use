@@ -7,6 +7,7 @@ SCHEMA = {
     "name": "browser_facebook",
     "description": (
         "One Facebook Page workflow step using Betterwright; no code argument. "
+        "Small agents should prefer browser_facebook_next, which chooses and executes the next step. "
         "Call browser_facebook_run first to restore the authorized profile range and progress. "
         "The agent owns the account/profile loop. Call status for next_action; repeat browse "
         "in chunks up to 60 seconds: Home 60, Reels 60, Home 60 with varied pacing; browse_after Home 30. "

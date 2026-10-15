@@ -1,42 +1,35 @@
-# Start or resume the Facebook Page workflow
+# Start or resume with a small agent
 
-Give the agent this prompt after reloading the updated jev-use MCP connection.
-Supply credentials privately at runtime; do not save them in this prompt file.
+Reload the updated jev-use MCP connection first. Supply credentials privately at
+runtime; never save them in this file. Replace the selection with the actual
+profiles the user requested.
 
 ```text
-Use $facebook-create-pages. Read its SKILL.md and follow the structured
-browser_facebook actions through one persistent jev-use MCP connection.
+Use $facebook-create-pages. Read SKILL.md. Work through one persistent jev-use
+MCP connection, using browser_facebook_next as the execution interface.
 
-Process only the GoLogin profiles/accounts I authorize for this run. Use the
-runtime credentials and stable Page-name/category mapping I supply. Discover
-exact profile IDs; resume from status and existing checkpoints before acting.
-Do not repeat completed or uncertain creation attempts.
+Read browser_facebook_run status. For this authorized continuation, resume its
+saved run if needed. For a new job, start a stable run with exactly the profiles
+I selected: one profile, numeric range, explicit list, or observed named IDs.
+Never let a saved cursor override a new selection. Preserve prior journals.
 
-First call browser_facebook_run status to recover the last scope, cursor,
-pending action, saved account mapping, and checkpoint history. Resume the saved
-run only when this request authorizes work. For a new job, start a run with
-profile_numbers for a single profile/list, profile_start/profile_end for a range,
-or observed profile_ids for named profiles, exactly matching my instruction.
-The user chooses the profiles for each job; do not reuse an old range when a
-different selection is requested. Pass its run_id
-to browser_open and all structured steps. If I request Profiles 23 to 29, work
-only those exact profiles and stop at 29; never broaden to all profiles. After
-an interruption, inspect the cursor account's current status before acting.
-If I say stop, pause the saved run and cease new actions.
+Call browser_facebook_next with that run_id. When status is continue, execute
+its exact next_call. When needs_input, supply the requested fields for the
+returned account using my credentials and stable Page-name/category mapping.
+Ask only for inputs I have not provided. Runtime password remains in server
+memory, never files. After restart, resupply it when requested. Only use an
+explicit user correction for corrected_password.
 
-For each account: login; settle alerts 20 seconds; browse Home 60 seconds,
-Reels 60 seconds, Home 60 seconds with varied pauses and scrolls; open Page
-creation; settle alerts 20 seconds; fill; create once; verify success; return
-Home; browse 30 seconds; logout and verify the chooser. Finish all unprocessed
-accounts, save/close the profile, then advance. Target 5-6 minutes without
-shortening required browsing; report actual time and blockers.
+For needs_resume, read run status and resume this authorized job, then call
+next. For blocked, use offered read-only vision diagnosis once and report the
+unresolved blocker. Do not loop, use raw scripts, guess passwords, change run
+IDs to escape guards, or bypass MFA/CAPTCHA. Only report completed when the
+tool returns completed. If I say stop, pause the run and cease new actions.
 
-If something unexpected happens, inspect current state, handle supported
-popups, and resume the returned next_action. Preserve IDs, journals, and
-creation guards. Never bypass MFA/CAPTCHA/restrictions or guess passwords.
-Record verified successes and blocked/pending work. If I stop creation,
-stop publishing immediately and perform only requested cleanup/maintenance.
+The backend owns account/profile selection, popup checks, current-state
+recovery, Home/Reels/Home browsing with varied pacing, single creation,
+confirmation, postcreation browsing, logout and profile saving. Preserve all
+required waits. Report actual results, timings and unfinished work honestly.
 ```
 
-The complete maintained instructions are in
-[the skill](../skills/facebook-create-pages/SKILL.md).
+See [the skill](../skills/facebook-create-pages/SKILL.md) for status handling.

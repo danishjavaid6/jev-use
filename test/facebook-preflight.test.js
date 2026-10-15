@@ -40,3 +40,11 @@ test('malformed or failed dependency probes return actionable errors without bac
     assert.ok(!JSON.stringify(result).includes('private diagnostic'));
   }
 });
+
+test('vision requires both the image-capable SDK and Pillow', () => {
+  for (const present of [true, false]) {
+    const result = facebookPreflight('python', { execute: () => ({ ok: true,
+      stdout: JSON.stringify({ typesafe_sdk: true, images: present, PIL: present }) }) });
+    assert.equal(result.vision.ok, present);
+  }
+});

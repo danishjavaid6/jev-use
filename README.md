@@ -86,11 +86,37 @@ and generated text require a configured `JEV_USE_TEXT_MODEL`; an unavailable
 planner is skipped. Literal text supplied to `browser_action` needs no writer.
 
 For repeated Facebook Page creation, use `/facebook-create-pages` (or
-`$facebook-create-pages` in Codex). The default is the structured
-`browser_facebook` MCP tool: the agent calls actions with JSON arguments and
-owns the account/profile loop. No caller-written JavaScript or batch script is
-needed. Betterwright performs the actions in the existing GoLogin browser;
-Jev's `browser_use` remains available for inspecting unfamiliar controls.
+`$facebook-create-pages` in Codex). The default is `browser_facebook_next`:
+the agent repeatedly calls one tool with a stable run ID. The backend chooses
+the next authorized profile, observed account and bounded action from fresh
+browser state and durable journals. Betterwright performs actions in GoLogin.
+No caller-written JavaScript or batch script is needed.
+
+After starting/resuming the scoped run below, call:
+
+```json
+{"run_id":"my-batch"}
+```
+
+Pass that object to `browser_facebook_next`. On `continue`, repeat its exact
+`next_call`. On `needs_input`, supply the requested runtime password or current
+account's Page details. The common password stays in this MCP process only,
+expires after 30 minutes idle, and is cleared on pause/completion/restart.
+Page details are durable; credentials must be resupplied after restart.
+`needs_resume` requires reading run status and an authorized `resume`.
+`paused` and `blocked` stop the loop; `completed` requires all observed accounts'
+creation evidence, verified logout and profile closure. Repeated failures stop
+after two attempts. The tool never bypasses historical creation guards.
+
+`browser_facebook_vision(run_id="my-batch")` adds experimental, read-only Jev
+1.14 screen classification, popup presence and a possible Close-button box.
+It sends `TypeSafe-Danger-Zone-Images: true`, with the image-capable SDK and
+Pillow supplied by the `live` extra. Viewport screenshots cannot show native
+browser-chrome popups; native dialog handlers remain necessary. Vision does
+not authorize clicks or substitute for account identity/creation evidence.
+
+The lower-level `browser_facebook` actions below remain available for focused
+manual recovery and maintenance; smaller agents should use the next-step tool.
 
 Use the [start/resume prompt](prompts/facebook-pages.md) for the full agent-driven
 batch. Before a new session, run `jev-use doctor`: when GoLogin is configured it
@@ -98,7 +124,8 @@ also checks the Facebook recovery schema, Betterwright CLI/SDK, and Jev inspecti
 dependency without launching a browser. Reload the harness's MCP connection after
 upgrading; a successful fresh-launch check does not refresh an older live server.
 
-Open each requested GoLogin profile with `browser_open`, then call these actions:
+For lower-level manual control, open each requested profile with `browser_open`.
+For the default next-step mode, the tool opens and closes profiles itself.
 
 First restore the saved batch with `browser_facebook_run(action="status")`.
 For a new job, call `browser_facebook_run(action="start", run_id="my-batch",

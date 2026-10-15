@@ -341,6 +341,25 @@ def record_profile(run_id: str, profile_id: str, port: int | None, event: str) -
         _save(state)
 
 
+def task_progress(run_id: str, profile_id: str, *, inventoried: bool = False,
+                  completed: bool = False, failure: dict | None = None,
+                  clear_failure: bool = False) -> None:
+    """Persist only controller facts, never secrets, tool payloads or exceptions."""
+    with _locked():
+        state = _load(run_id)
+        _guard(state, profile_id)
+        progress = state.setdefault("controller", {}).setdefault(profile_id, {})
+        if inventoried:
+            progress["inventoried"] = True
+        if completed:
+            progress["completed"] = True
+        if clear_failure:
+            progress.pop("failure", None)
+        if failure is not None:
+            progress["failure"] = {k: failure[k] for k in ("account", "action", "stage", "count")}
+        _save(state)
+
+
 def import_inventory(path: Path) -> dict:
     """One-time migration of this project's existing non-secret batch inventory.
 

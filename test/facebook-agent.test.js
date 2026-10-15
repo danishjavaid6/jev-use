@@ -153,6 +153,20 @@ test('status completes a recovery only on matching identity then requires fresh 
   assert.equal(f.checkpoint.loginRecoveries[0].completedAt, undefined);
 });
 
+test('status reconciles a lost login response only for the exact observed account ID', async () => {
+  const f = fixture();
+  f.checkpoint.loginSubmitted = true;
+  assert.equal((await f.step('status', { account_id: 'account1' })).next_action, 'wait_home');
+  assert.equal(f.checkpoint.accountId, 'account1');
+  assert.equal(f.checkpoint.stage, 'signed_in');
+  const wrong = fixture();
+  assert.equal((await wrong.step('status', { account_id: 'different' })).next_action, 'inspect');
+  assert.equal(wrong.checkpoint.stage, 'started');
+  const neverAttempted = fixture();
+  await neverAttempted.step('status', { account_id: 'account1' });
+  assert.equal(neverAttempted.checkpoint.stage, 'started', 'reading an identity cannot manufacture a login attempt');
+});
+
 test('rejects premature creation flow, account switching and wrong active identity', async () => {
   const f = fixture();
   await assert.rejects(f.step('fill'), /Expected login/);

@@ -86,3 +86,17 @@ def test_login_backend_errors_never_echo_secret(monkeypatch, action):
     with pytest.raises(betterwright.BetterWrightError) as exc:
         mcp_server.tool_browser_facebook({**BASE, "action": action, "password": "PRIVATE"})
     assert "PRIVATE" not in str(exc.value)
+
+
+def test_failed_structured_action_omits_unrelated_journals(monkeypatch):
+    monkeypatch.setattr(mcp_server.betterwright, "run_script", lambda *args, **kwargs: {
+        "ok": False, "error": "button unavailable", "workflowCheckpoints": {"old": {"stage": "created"}},
+        "browserDialogs": {"inspected": True, "blocked": False}})
+    monkeypatch.setattr(mcp_server, "reset_browser_session", lambda: None)
+    monkeypatch.setitem(mcp_server._SESSION, "target", None)
+    with pytest.raises(betterwright.BetterWrightError) as exc:
+        mcp_server.tool_browser_script({"port": 9222, "code": "return 1;", "facebook_workflow": True})
+    payload = json.loads(str(exc.value))
+    assert "workflowCheckpoints" not in payload
+    assert payload["error"] == "button unavailable"
+    assert payload["browserDialogs"]["inspected"]

@@ -1091,6 +1091,8 @@ def test_surface_is_browser_and_android_only() -> None:
     assert names == [
         "browser_facebook",
         "browser_facebook_run",
+        "browser_facebook_next",
+        "browser_facebook_vision",
         "browser_profiles",
         "browser_open",
         "browser_close",

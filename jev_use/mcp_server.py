@@ -70,9 +70,11 @@ from . import harness
 from . import betterwright
 from . import facebook_pages
 from . import facebook_runs
+from . import facebook_task
+from . import vision
 
 SERVER_NAME = "jev-use"
-SERVER_VERSION = "0.3.0"
+SERVER_VERSION = "0.4.0"
 PROTOCOL_VERSION = "2025-06-18"
 SUPPORTED_PROTOCOL_VERSIONS = {"2024-11-05", "2025-03-26", PROTOCOL_VERSION, "2025-11-25"}
 CACHE_PATH = Path(__file__).resolve().parent.parent / ".jev-browser-cache.json"
@@ -309,9 +311,10 @@ PROMPT_TEMPLATE = """Task: {task}
 Call browser_profiles once; reuse the matching port or browser_open the requested profile.
 For a known URL use browser_read(port=N, url=...) directly. For several URLs use
 browser_read_many. For Facebook Page creation first restore/start browser_facebook_run
-with exactly the profiles selected in the user's instruction, then use browser_facebook
-structured actions and follow next_action; the agent drives every account/profile loop.
-Keep the same run_id/account across retries. Use status after a lost response;
+with exactly the profiles selected in the user's instruction, then repeat browser_facebook_next
+with its run_id and follow status/next_call. The backend owns bounded account/profile transitions.
+Supply runtime password or Page details only when requested; never write credentials to disk.
+Use run status/resume after a lost response;
 submitting requires confirm, never a second create. Browse Home60, Reels60, Home60
 before creation and Home30 afterward; both alert waits are 20 seconds.
 For one exact click/fill/scroll use browser_action. For other
@@ -422,6 +425,8 @@ def prompt_messages(name: str, arguments: dict[str, Any]) -> dict[str, Any] | No
 TOOLS: list[dict[str, Any]] = [
     facebook_pages.SCHEMA,
     facebook_runs.SCHEMA,
+    facebook_task.SCHEMA,
+    vision.SCHEMA,
     {
         "name": "browser_profiles",
         "description": "List running browsers and saved profiles. Call FIRST, once; reuse a matching live CDP port.",
@@ -1190,7 +1195,41 @@ def tool_browser_facebook_run(args: dict[str, Any]) -> str:
     else:
         raise ValueError("Unknown run-state action")
     _FACEBOOK_RUN_ID = None if action == "pause" else state["run_id"]
+    if action == "pause":
+        facebook_task.forget(state["run_id"])
     return json.dumps(state, ensure_ascii=False)
+
+
+def tool_browser_facebook_next(args: dict[str, Any]) -> str:
+    """One controller transition; never a batch loop hidden inside a tool."""
+    result = facebook_task.advance(
+        args, owner=lambda: _GOLOGIN.get("session"),
+        open_profile=lambda profile_id, run_id: tool_browser_open({
+            "profile": profile_id, "vendor": "gologin", "run_id": run_id,
+            "headless": False, "url": "https://www.facebook.com/"}),
+        close_profile=lambda: tool_browser_close({}), action=tool_browser_facebook)
+    return json.dumps(result, ensure_ascii=False)
+
+
+def tool_browser_facebook_vision(args: dict[str, Any]) -> str:
+    """Capture only the owned workflow tab; diagnostic inference executes nothing."""
+    if set(args) != {"run_id"}:
+        raise ValueError("Vision requires only run_id")
+    state = facebook_runs.status(args["run_id"])
+    owner = _GOLOGIN.get("session")
+    if not owner or owner.profile.id not in {p["id"] for p in state["profiles"]}:
+        return json.dumps({"status": "blocked", "reason": "no_owned_profile_in_run"})
+    try:
+        captured = tool_browser_script({"port": owner.port,
+            "checkpoint_scope": "gologin:" + owner.profile.id,
+            "facebook_workflow": True, "dismiss_overlays": False, "timeout": 30,
+            "code": "return await screenshot({kind: 'debug', name: 'jev-vision.png'});"})
+        path = json.loads(captured.split("\n", 1)[1])["result"]["path"]
+        return json.dumps({"status": "observed", **vision.diagnose_file(path)})
+    except Exception as exc:
+        # Image payloads, authentication headers and provider traces stay private.
+        return json.dumps({"status": "blocked", "reason": "vision_unavailable",
+                           "error_type": type(exc).__name__, "actionable": False})
 
 
 def tool_browser_facebook(args: dict[str, Any]) -> str:
@@ -1290,6 +1329,10 @@ def tool_browser_script(args: dict[str, Any]) -> str:
         options["submission"] = args["submission"]
     result = betterwright.run_script(port, code, **options)
     if not result.get("ok"):
+        # Journals are already durable. Historical accounts overwhelm smaller
+        # models and are unrelated to the current error; keep active diagnostics.
+        if args.get("facebook_workflow"):
+            result.pop("workflowCheckpoints", None)
         raise betterwright.BetterWrightError(json.dumps(result, ensure_ascii=False))
     return f"port={port}\n" + json.dumps(result, ensure_ascii=False)
 
@@ -1440,6 +1483,8 @@ def tool_android_location(args: dict[str, Any]) -> str:
 
 
 HANDLERS = {
+    "browser_facebook_next": tool_browser_facebook_next,
+    "browser_facebook_vision": tool_browser_facebook_vision,
     "browser_facebook": tool_browser_facebook,
     "browser_facebook_run": tool_browser_facebook_run,
     "browser_profiles": tool_browser_profiles,

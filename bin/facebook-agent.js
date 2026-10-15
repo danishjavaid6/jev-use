@@ -114,11 +114,18 @@ const facebookAgent = {
       const chooserVisible = await page.getByText(/^Log into Facebook$/i).first().isVisible().catch(() => false);
       const passwordRejected = await page.getByText('The password you entered is incorrect.', { exact: true }).first().isVisible().catch(() => false);
       const identity = await facebookPages.activeAccountId();
+      const expectedIdentity = checkpoint.accountId || options.account_id;
+      // A response can be lost after login commits but before stage changes.
+      // Reconcile only the exact verified identity, never a matching name.
+      if (checkpoint.stage === 'started' && (checkpoint.loginSubmitted || checkpoint.loginCardClicked) &&
+          identity && expectedIdentity === identity) {
+        checkpoint.accountId = identity;
+        checkpoint.stage = 'signed_in';
+      }
       const pendingRecovery = checkpoint.loginRecoveries?.at(-1);
       if (pendingRecovery && pendingRecovery.completedAt == null && identity === checkpoint.accountId) pendingRecovery.completedAt = Date.now();
       if (identity && identity === checkpoint.accountId && checkpoint.stage !== 'started') delete checkpoint.loginFailure;
       const url = new URL(page.url());
-      const expectedIdentity = checkpoint.accountId || options.account_id;
       const accountMismatch = Boolean(identity && expectedIdentity && identity !== expectedIdentity);
       const kind = identity ? (/\/pages\/create/.test(url.pathname) ? 'creation_form' : 'signed_in')
         : passwordPromptVisible ? 'password_form' : chooserVisible ? 'account_chooser' : 'unknown';
@@ -131,7 +138,7 @@ const facebookAgent = {
       else if (identity && kind !== 'creation_form' && ['form_open', 'form_ready'].includes(checkpoint.stage)) nextAction = 'open_form';
       else if (kind === 'creation_form' && ['signed_in', 'home_ready', 'browsed'].includes(checkpoint.stage)) nextAction = 'home';
       return { ...result(), next_action: nextAction,
-        current_state: { kind, url: url.origin + url.pathname, accountMismatch,
+        current_state: { kind, url: url.origin + url.pathname, accountMismatch, account_id: identity || null,
           identityMatches: expectedIdentity ? identity === expectedIdentity : null },
         live_login: { identityPresent: Boolean(identity), passwordPromptVisible, chooserVisible, passwordRejected } };
     }
