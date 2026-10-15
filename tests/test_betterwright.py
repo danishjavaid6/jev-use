@@ -16,6 +16,14 @@ class _Response:
         return json.dumps({"webSocketDebuggerUrl": "ws://127.0.0.1:9222/devtools/browser/test"}).encode()
 
 
+def test_pnpm_home_discovery_without_inherited_path(monkeypatch, tmp_path):
+    monkeypatch.setattr(betterwright.shutil, "which", lambda name: None)
+    monkeypatch.setenv("PNPM_HOME", str(tmp_path))
+    cli = tmp_path / "betterwright.cmd"
+    cli.write_text("fixture")
+    assert betterwright.executable() == str(cli)
+
+
 def test_ws_url_for_resolves_the_browser_endpoint(monkeypatch):
     seen = []
 
@@ -76,6 +84,33 @@ def test_environment_for_adds_a_shim_directory_to_path(monkeypatch, tmp_path):
 
     assert env["PATH"].startswith(str(tmp_path))
     assert "/system/bin" in env["PATH"]
+
+
+def test_duplicate_facebook_tabs_reach_selector_and_pin_exact_target(monkeypatch):
+    monkeypatch.setattr(betterwright, "ws_url_for", lambda port: "ws://127.0.0.1:9222/browser")
+    monkeypatch.setattr(betterwright, "list_tabs", lambda port: [
+        {"id": "one", "url": "https://www.facebook.com/"},
+        {"id": "two", "url": "https://www.facebook.com/"}])
+    calls = []
+    class Bridge:
+        def __init__(self, command):
+            self.process = type("Process", (), {"poll": lambda self: None})()
+        def run(self, request, timeout):
+            calls.append(request)
+            return {"ok": True, "workflowAttachment": {"targetId": "two"}}
+        def close(self):
+            pass
+    monkeypatch.setattr(betterwright, "_Bridge", Bridge)
+    monkeypatch.setattr(betterwright, "_BRIDGES", {})
+    monkeypatch.setattr(betterwright, "_WORKFLOW_TABS", {})
+    betterwright.run_script(9222, "return 1", command="fixture", facebook_workflow=True)
+    assert [t["id"] for t in calls[0]["targets"]] == ["one", "two"]
+    betterwright.close_sessions()
+    betterwright.run_script(9222, "return 1", command="fixture", facebook_workflow=True)
+    assert calls[1]["target_id"] == "two"
+    assert len(calls[1]["targets"]) == 1
+    with pytest.raises(betterwright.BetterWrightError):
+        betterwright.run_script(9222, "return 1", command="fixture", page_target_id="gone", facebook_workflow=True)
 
 
 def test_dismiss_overlays_covers_google_one_tap_and_guards_password_forms():

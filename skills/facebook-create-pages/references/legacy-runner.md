@@ -1,0 +1,266 @@
+# Legacy prepared runner
+
+Use only when the user explicitly chooses the older scripted prepare/finish mode.
+The structured browser_facebook workflow is the default. This older mode does
+not implement the required Home/Reels/Home split; use structured actions for it.
+
+## Legacy prepared runner (explicit opt-in)
+
+The executable [account-runner.js](../scripts/account-runner.js) is bundled
+and injected into `browser_script` as `facebookPages`. Invoke it directly; do not
+rewrite the login, category, creation, wizard, or logout logic for each account.
+No live mutation is authorized merely by loading this skill.
+
+## Setup once
+
+1. Load `browser_profiles`, `browser_open`, `browser_script`, `browser_close`.
+2. Find the exact requested GoLogin profile; open with `vendor="gologin"` and
+   `headless=false` if needed. Reuse its port throughout the task.
+3. Inspect the saved-account chooser once. Use the observed accounts and the
+   requested count. Create one stable run ID and an account/Page-name mapping.
+   If names are left to you, choose them once and keep them on retries.
+4. Reuse the task-supplied password only for login; do not save credentials in
+   the runner, run IDs, journals, screenshots, or files.
+
+Use the complete profile list returned by `browser_profiles`; it handles API
+pagination. Do not search local GoLogin metadata or guess IDs to replace that
+list. When the user says "all GoLogin profiles", select every exact profile ID
+returned by that call without asking a profile-scope question, sort by the
+numeric Profile number, and process them line by line: open `Profile 1`, finish
+or skip it, close it, then open `Profile 2`, continuing numerically through the
+last listed profile. Never start with
+the API's newest/first returned item (for example `Profile 22`) or any other
+profile merely because it appeared first in the response. When the user
+supplies an ordered password list without an account mapping, assign password
+index `n` to saved-account card index `n` within each profile. Do not cycle or
+reuse a password after the list ends: mark extra accounts `missing_password`,
+skip them, and continue. Keep credentials out of files and diagnostics.
+For an `Invalid request` tool failure, identify the tool and check its published
+schema, correct the arguments, and retry once. Preserve checkpoints and report
+the failed tool and error if it persists rather than claiming a transient cause.
+
+### Batch contract
+
+The batch controller accepts an optional runtime-only mapping with this shape:
+
+```js
+{
+  profiles: [{ id: "<exact GoLogin profile id>" }],
+  accounts: [{
+    profile_id: "<exact GoLogin profile id>",
+    account: "<observed Facebook account name or id>",
+    page_name: "<stable page name>",
+    password: "<runtime value>"
+  }]
+}
+```
+
+If no mapping is supplied, it builds that mapping from the complete profile list,
+the observed saved-account card order, and the ordered password list supplied in
+the request. It enumerates all profiles, processes each exact profile once,
+processes every account with a matching password, skips and records
+`missing_password` or `mfa_required`, calls `browser_close`, and only then opens
+the next profile.
+Passwords are accepted only in the invocation memory; they must never be placed
+in source files, environment files, checkpoints, journals, screenshots, logs, or
+page names. Passwords are never guessed, rotated, or reused after the ordered
+list is exhausted.
+
+## Two calls per account
+
+Use the same config and checkpoint scope in both calls. `account` is a stable
+account identifier or the observed saved-account name; `account_name` is needed
+only when those differ. The runner checks the active identity on resumption.
+
+First call: `browser_script(port=N, timeout=240, code=...)`:
+
+```js
+return await facebookPages.prepare({
+  run_id: RUN_ID,
+  account: ACCOUNT,
+  page_name: PAGE_NAME,
+  bio: BIO,
+  password: TASK_PASSWORD
+});
+```
+
+Replace uppercase variables with task values in the invocation, without storing
+the password in an external file. Keep default `dismiss_overlays=true`; the
+Sign in as credential chooser is distinct from the Facebook password form.
+
+Preparation verifies an already-signed-in account using its identity and matching
+self-profile link, or selects the saved card once and waits up to 60 seconds for
+password/remembered login to finish. It settles browser/in-page alerts for 20
+seconds (page-owned JS alerts are auto-accepted by the bridge; in-page
+notification prompts are dismissed), browses the feed for 3 minutes with uneven,
+human-like pacing (random pauses and scroll distances, tries an observed
+Reels/Videos link once if the home feed has no playback), opens the Page
+creation form, settles alerts for another 20 seconds, fills the Page form,
+waits through the configured post-fill settling delay, verifies it is ready,
+and saves `submission_reserved` without creating the Page. The bundled runner
+defaults to a 30-second browse, no alert-settling delay
+(`alert_settle_seconds`), no post-fill delay, and no post-creation
+home-feed scroll; override `browse_seconds`, `alert_settle_seconds`,
+`post_fill_delay_ms`, and `post_success_browse_seconds` deliberately when
+needed. If the user changes the browsing requirement, adapt that step
+deliberately rather than claiming it occurred. No observed playback means pause
+for one focused inspection.
+
+If preparation returns `mfa_required`, record that account as skipped, leave its
+checkpoint intact, and continue with the next saved account or GoLogin profile.
+
+If `submission_reserved`, second call:
+
+```text
+browser_script:
+  port: N
+  timeout: 180
+  submission: {run_id: RUN_ID, account: ACCOUNT}
+  code: return await facebookPages.finish({run_id: RUN_ID, account: ACCOUNT, page_name: PAGE_NAME});
+```
+
+The submission argument checks actionability first, journals the attempt, and
+clicks Create Page's button role once (works for `div[role="button"]`). The runner
+then waits for the exact delayed success notice, accepts the optional wizard's
+beforeunload, returns home, browses the feed for 30 seconds
+(`post_success_browse_seconds`), logs out through the account menu, and verifies
+the chooser returns. Continue to the next account only after `logged_out`.
+
+For a multi-profile batch, drive the loop yourself with one tool call at a time —
+never a driver script. Call `browser_profiles` once, then iterate the returned
+GoLogin profiles numerically: open `Profile N` (`vendor="gologin"`,
+`headless=false`), reuse its port for every call, enumerate the chooser inside
+the workflow tab with `return await workflow.listSavedAccounts();` (pin
+`page_url: "https://www.facebook.com/"` on that first `browser_script` call so
+later calls follow the same tab), register each observed card with its stable
+page name in `runs/facebook-batch-todo.json` (non-secret fields only), then run
+prepare/finish per account. After each account reaches `logged_out`,
+`mfa_required`, or `missing_password`, re-inspect the chooser until no
+unprocessed cards remain then `browser_close`. Only then open the next profile.
+Passwords come from the task invocation only (`TASK_PASSWORD` for a single
+ordered password mapped to live card index 0, or per-slot values for the
+registry `password_ref` slots) and never touch files:
+
+```js
+// prepare (timeout 240)
+return await facebookPages.prepare({
+  run_id: RUN_ID, account: ACCOUNT, page_name: PAGE_NAME,
+  bio: BIO, password: TASK_PASSWORD
+});
+// finish (timeout 180, exactly one Create click via submission)
+return await facebookPages.finish({ run_id: RUN_ID, account: ACCOUNT, page_name: PAGE_NAME });
+```
+
+When driving the loop by hand instead, call `browser_profiles` once, iterate the returned
+GoLogin profiles one at a time, and close each profile with `browser_close` only
+after its account list is exhausted. At the start of every profile, enumerate all
+visible saved-account cards and create a work item for each one. After each
+account reaches `logged_out` or `mfa_required`, inspect the chooser again and
+continue until there are no unprocessed account cards left. Never advance to the
+next GoLogin profile after creating only the first Page, and never call
+`browser_close` while another saved account remains. Then open the next profile
+and reuse the same workflow. A profile is complete only when every observed
+account is terminal (`logged_out` or `mfa_required`) or the chooser is verified
+empty.
+
+## Resume and unexpected UI
+
+- `logged_out`: account complete; do not create again.
+- `mfa_required`: two-step verification is required; skip this account and continue the batch.
+- `created`: run `facebookPages.finish` WITHOUT `submission` to finish logout.
+- `submitting`: run `facebookPages.finish` WITHOUT `submission` to confirm and
+  log out. If the notice is gone, inspect the actual Page identity once and use
+  an observed confirmation selector/URL/ID. An unchanged URL, disabled button,
+  search match, or "already manage a Page" error does not authorize another click.
+- `submission_reserved`: inspection does not consume it. A missing selector
+  fails before clicking, so correct it once and retry the submission argument.
+- Other stages: correct the observed problem and retry preparation with the SAME
+  run ID/account. Never erase checkpoints or generate new IDs to bypass a lock.
+
+Never manually seed `accountId` to skip login. If the self-profile link cannot
+verify the requested account, inspect once; an `account_id` supplied by the user
+or verified in that inspection may be passed in config. The cookie must match it.
+A login already selected/submitted resumes waiting without repeating the action.
+
+Selector overrides in the runner are only for demonstrated UI changes:
+`account_selector`, `name_selector`, `category_selector`,
+`option_selector`, `bio_selector`, `create_selector`; finish accepts `confirmation`
+and `logout` options from the workflow helpers. Pass `create_selector` in the
+submission argument as `selector` too. Do not guess selectors or URLs.
+For externally opened profiles, keep a stable non-secret `checkpoint_scope` on
+all calls; profiles opened by this MCP server use the GoLogin ID automatically.
+If an older checkpoint lacks `accountId`, inspect identity before migrating it;
+never infer that it is the currently signed-in account.
+
+Stop after one focused inspection/correction if the issue remains unresolved.
+Hand off MFA/CAPTCHA/account restrictions or unsupported native dialogs. Never
+bypass creation guards with a manual click, probe hidden APIs, clear cookies, or
+perform a logout URL experiment. Batch known steps rather than narrate each click.
+
+If login stalls, report the runner's `loginObservation` and any tool warnings.
+Saved-account cards are not proof of live sessions; an absent identity cookie
+and unchanged page do not prove expired sessions or restrictions. A native-dialog
+connection warning means DOM inspection cannot rule out a browser-owned popup.
+Inspect the visible browser once (including browser chrome), or hand off that
+inspection when unavailable. Do not click behind a suspected native popup, test
+other accounts to generalize the failure, or describe untested accounts as blocked
+by a proven account-specific cause. Preserve the same run and checkpoints.
+
+## Finish
+
+Call `browser_close` to save the GoLogin profile. Report each account's Page name,
+confirmed stage, captured Page URL/ID when available, and unfinished work. Include
+elapsed time and the returned `timings` (login, browsing, navigation, fill,
+confirmation, logout); do not call pending creation or pending logout complete.
+
+### Current GoLogin registry
+
+The checked-in snapshot at `config/gologin-profiles.json` records the current
+29-profile name/ID mapping after the Ban Profiles workspace was deleted. Use the
+exact ID from the live `browser_profiles` response when opening a profile; use the
+registry as a readable reference and detect/report any live changes instead of
+falling back to a name when duplicate names exist.
+
+The checked-in `config/facebook-account-registry.json` records the supplied
+profile/account ID and name inventory in Profile 1-to-29 order. Each account's
+`password_ref` is a non-secret slot such as `password_2`; the corresponding
+password must be supplied at runtime and must never be copied into this file.
+Use the exact profile/account ID and its mapped password slot directly. Do not
+try other password slots, rotate credentials, or retry a known account with a
+different password. If the runtime secret for a mapped slot is unavailable,
+record `missing_password` and continue.
+
+## Primary location
+
+For an already verified Facebook ID, the runner also exposes a read-only
+primary-location check. Pass the ID observed in the `c_user` identity cookie;
+the method refuses to return a location if Facebook switches accounts:
+
+```js
+return await facebookPages.primaryLocation({account_id: "<verified Facebook ID>"});
+```
+
+The result is `state: "location"` with `location` only when Facebook's page
+names a value. `login` and `unknown` are reported without guessing.
+
+
+### Batch todo file
+
+The loop above is long enough to lose your place on a restart. Track it in
+`runs/facebook-batch-todo.json` (local-only, gitignored) with the helper at
+[scripts/batch-todo.js](scripts/batch-todo.js). It stores profile/account
+statuses only — never passwords. `missing_password` and `mfa_required` are the
+only allowed skip reasons.
+
+```text
+node skills/facebook-create-pages/scripts/batch-todo.js init --file runs/facebook-batch-todo.json --batch B1 --profiles config/gologin-profiles.json
+node skills/facebook-create-pages/scripts/batch-todo.js add-accounts --file runs/facebook-batch-todo.json --profile-id <id> --accounts '[{"account":"Name","page_name":"Page"}]'
+node skills/facebook-create-pages/scripts/batch-todo.js next --file runs/facebook-batch-todo.json
+node skills/facebook-create-pages/scripts/batch-todo.js mark --file runs/facebook-batch-todo.json --profile-id <id> --account Name --status logged_out
+node skills/facebook-create-pages/scripts/batch-todo.js status --file runs/facebook-batch-todo.json
+```
+
+Protocol: init once per batch, add-accounts when a profile's cards are
+enumerated, next before starting work, mark after each account reaches a
+terminal stage (`logged_out`, or `skipped` with `missing_password` /
+`mfa_required`). A profile is done only when the todo file says so.

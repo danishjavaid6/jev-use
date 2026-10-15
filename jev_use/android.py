@@ -32,6 +32,7 @@ from __future__ import annotations
 import re
 import subprocess
 import time
+import uuid
 import xml.etree.ElementTree as ET
 from collections import Counter
 from dataclasses import dataclass, field
@@ -959,7 +960,9 @@ def cache_busted(url: str, *, stamp: int | float | None = None) -> str:
     what makes the result follow the session rather than the cache.
     """
     separator = "&" if "?" in url else "?"
-    return f"{url}{separator}_jev={int(stamp if stamp is not None else time.time_ns())}"
+    # Windows can return the same wall-clock tick for consecutive calls.
+    nonce = int(stamp) if stamp is not None else uuid.uuid4().int
+    return f"{url}{separator}_jev={nonce}"
 
 
 def open_facebook_page(serial: str, url: str, *, timeout: float = ADB_TIMEOUT) -> None:

@@ -34,6 +34,7 @@ def test_url_read_uses_port_and_no_action_model(monkeypatch):
 
 def test_windows_prefers_installed_chrome_to_path_or_registry(monkeypatch, tmp_path):
     binary = tmp_path / host._WINDOWS_CHROME_PATHS[0]
+    binary.parent.mkdir(parents=True, exist_ok=True)
     binary.write_text("test")
     monkeypatch.setattr(host, "IS_WINDOWS", True)
     monkeypatch.setenv("PROGRAMFILES", str(tmp_path))

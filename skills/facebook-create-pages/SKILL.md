@@ -1,224 +1,197 @@
 ---
 name: facebook-create-pages
-description: Create Facebook Pages across saved accounts in an existing GoLogin profile using a reusable runner, verified creation checkpoints, and logout between accounts.
+description: Create Facebook Pages across saved accounts in GoLogin using structured Jev/Betterwright tools, resumable checkpoints, popup handling, and verified logout.
 ---
 
-Use this skill for the user's authorized Page-creation task. Keep GoLogin as the
-browser owner. Use the jev-use MCP tools and their returned port; never start a
-second browser, clear cookies, change proxy/fingerprint settings, or use a shell
-CDP driver while MCP is attached.
+Use the user's requested profiles and accounts. Loading this skill does not
+start publication. If the user stops Page creation, stop creating Pages and
+continue only the requested inspection, maintenance, or cleanup.
 
-The executable [scripts/account-runner.js](scripts/account-runner.js) is bundled
-and injected into `browser_script` as `facebookPages`. Invoke it directly; do not
-rewrite the login, category, creation, wizard, or logout logic for each account.
-No live mutation is authorized merely by loading this skill.
+## Tools and startup
 
-## Setup once
+Use one persistent **jev-use MCP connection**. GoLogin owns the browser;
+Betterwright performs structured actions. Do not use a batch driver script,
+launch another browser, change fingerprints/proxies, or clear cookies.
 
-1. Load `browser_profiles`, `browser_open`, `browser_script`, `browser_close`.
-2. Find the exact requested GoLogin profile; open with `vendor="gologin"` and
-   `headless=false` if needed. Reuse its port throughout the task.
-3. Inspect the saved-account chooser once. Use the observed accounts and the
-   requested count. Create one stable run ID and an account/Page-name mapping.
-   If names are left to you, choose them once and keep them on retries.
-4. Reuse the task-supplied password only for login; do not save credentials in
-   the runner, run IDs, journals, screenshots, or files.
+| Tool | Purpose |
+| --- | --- |
+| `browser_profiles` | Discover exact live GoLogin IDs and profile names once. |
+| `browser_facebook_run` | Restore durable scope/progress; start a bounded run, explicitly resume, or pause. No browser actions or passwords. |
+| `browser_open` | Open one allowed profile with `vendor="gologin"`, `headless=false`, and the saved `run_id`; retain its port. |
+| `browser_facebook` | One structured workflow action; no code argument. |
+| `browser_use` | One focused Jev inspection for unfamiliar UI, retaining the same tab. |
+| `browser_close` | Stop/save the owned profile before opening the next one. |
 
-Use the complete profile list returned by `browser_profiles`; it handles API
-pagination. Do not search local GoLogin metadata or guess IDs to replace that
-list. When the user says "all GoLogin profiles", select every exact profile ID
-returned by that call without asking a profile-scope question, sort by the
-numeric Profile number, and process them line by line: open `Profile 1`, finish
-or skip it, close it, then open `Profile 2`, continuing numerically through the
-last listed profile. Never start with
-the API's newest/first returned item (for example `Profile 22`) or any other
-profile merely because it appeared first in the response. When the user
-supplies an ordered password list without an account mapping, assign password
-index `n` to saved-account card index `n` within each profile. Do not cycle or
-reuse a password after the list ends: mark extra accounts `missing_password`,
-skip them, and continue. Keep credentials out of files and diagnostics.
-For an `Invalid request` tool failure, identify the tool and check its published
-schema, correct the arguments, and retry once. Preserve checkpoints and report
-the failed tool and error if it persists rather than claiming a transient cause.
+Before a new session run `jev-use doctor`. After upgrading, reload the harness's
+MCP connection: the current Facebook schema supports 60-second browse chunks,
+`tabs`, `page_target_id`, and `browser_facebook_run`. Doctor checks a fresh launcher, not a cached agent
+connection. Missing tools require loading that connection. Do not use the
+one-shot `jev-use call browser_open` fallback: its exit cleanup closes the profile.
+Do not create a holder process or ad hoc MCP client.
 
-### Batch contract
+Process ranges numerically; preserve an explicit list's requested order. Open
+only the selected profiles' exact discovered IDs. Keep
+one stable `run_id`, stable account keys, and a non-secret account/Page mapping.
+Use observed saved cards and public account IDs, never guessed identities.
+Preserve progress in a non-secret inventory: profile/account IDs, Page name,
+stage, creation evidence, elapsed time, and blocker reason. Passwords belong
+only in runtime `login`/`correct_password` arguments, never files or logs.
 
-The batch controller accepts an optional runtime-only mapping with this shape:
+## Durable state and user scope
 
-```js
-{
-  profiles: [{ id: "<exact GoLogin profile id>" }],
-  accounts: [{
-    profile_id: "<exact GoLogin profile id>",
-    account: "<observed Facebook account name or id>",
-    page_name: "<stable page name>",
-    password: "<runtime value>"
-  }]
-}
+Before opening a profile, call `browser_facebook_run(action="status")` to read
+the last run. This is local inspection and does not resume publication. Use its
+saved `run_id` for an instruction to continue that batch. Read `status`,
+`profiles`, `cursor`, `pending_action`, `interrupted_action`, `last_action`,
+`saved_accounts`, and each profile's `checkpoints` before selecting work.
+
+**The user's current instruction chooses the profiles.** There is no fixed
+profile or default range. A saved cursor must never override a newly requested
+selection. "Continue/resume" uses the saved selection; a new selection needs
+its own scoped job while retaining prior account/Page history. If a genuinely
+new job has no profile selection, ask which profiles instead of selecting all.
+
+For a new job, create a stable ID and translate the user's instruction into one
+selection mode in `start`:
+
+| User instruction | Selection arguments |
+| --- | --- |
+| "Only Profile 7" | `profile_numbers: [7]` |
+| "Profiles 10 to 15" | `profile_start: 10, profile_end: 15` |
+| "Profiles 2, 7, and 19" | `profile_numbers: [2, 7, 19]` |
+| A custom-named profile | Discover it and pass only its observed `profile_ids`. |
+
+For example, when the user selected only Profile 7:
+
+```json
+{"action":"start","run_id":"my-batch","profile_numbers":[7]}
 ```
 
-If no mapping is supplied, it builds that mapping from the complete profile list,
-the observed saved-account card order, and the ordered password list supplied in
-the request. It enumerates all profiles, processes each exact profile once,
-processes every account with a matching password, skips and records
-`missing_password` or `mfa_required`, calls `browser_close`, and only then opens
-the next profile.
-Passwords are accepted only in the invocation memory; they must never be placed
-in source files, environment files, checkpoints, journals, screenshots, logs, or
-page names. Passwords are never guessed, rotated, or reused after the ordered
-list is exhausted.
+Use only one selection mode; never add profiles between separate list entries.
+The exact IDs in `profiles` are the allowed set, including for sparse lists.
+Missing or duplicate profiles are errors; never substitute the first available
+profile. The saved selection and exact IDs are immutable for that run. If the user
+requests a different selection, use a separate scoped job and retain old journals;
+do not enlarge the old job or treat the new ID as permission to repeat creation.
+Never interpret "23 to 29" as all profiles or continue with 30 after 29.
 
-## Two calls per account
+For an authorized continuation of a paused/interrupted run, call `resume` with
+its saved `run_id`, then open its allowed profile and inspect account `status`
+before taking the next action. Inspect the saved cursor account first when it
+has unfinished work; then process remaining eligible accounts within the saved
+range. Retain blocked/deferred work, rather than silently forgetting it when
+advancing profiles. Completed accounts are skipped. Historical `submitting`
+checkpoints permit confirmation only, even when they belong to another run.
 
-Use the same config and checkpoint scope in both calls. `account` is a stable
-account identifier or the observed saved-account name; `account_name` is needed
-only when those differ. The runner checks the active identity on resumption.
+Each structured action saves its intent before execution and its result after
+execution. If the agent/connection dies, `pending_action` remains. Treat this
+as uncertain until explicit resume plus live inspection; never replay it blindly.
+Saved ports and cursor/checkpoint state are observations, not proof of current
+browser UI. Browser journals preserve partial Home/Reels progress and creation
+guards. Always use the current returned port and verify the account identity.
 
-For an already verified Facebook ID, the runner also exposes a read-only
-primary-location check. Pass the ID observed in the `c_user` identity cookie;
-the method refuses to return a location if Facebook switches accounts:
+On the user's stop instruction call `pause` when the connection permits, cease
+new actions, and stop the worker. A pause blocks further structured actions;
+already-submitted actions may still complete and must be inspected on resume.
+Do not interpret a maintenance request or reading saved state as authorization
+to resume publication. Keep passwords solely in runtime login arguments.
 
-```js
-return await facebookPages.primaryLocation({account_id: "<verified Facebook ID>"});
-```
+## Account flow
 
-The result is `state: "location"` with `location` only when Facebook's page
-names a value. `login` and `unknown` are reported without guessing.
+All `browser_facebook` calls include `port`, `run_id`, and `account`. On first
+attachment, the tool prefers a unique saved-account chooser among Facebook tabs.
+Subsequent calls retain the selected real tab and its popup watcher. Avoid
+`browser_read`, which can create a separate read tab. If attachment is ambiguous,
+call `action="tabs"` for observed IDs, inspect once, then supply the selected
+`page_target_id` on the next action. Do not select by duplicate URL alone or
+close unrelated tabs. Omit tab-selection arguments after attachment.
 
-First call: `browser_script(port=N, timeout=240, code=...)`:
+1. Restore/start the scoped run as above. Open its exact allowed GoLogin ID
+   using `browser_open(..., run_id=RUN)`. Structured actions require the profile
+   to be owned by this MCP connection; a supplied port alone cannot verify scope.
+   Call `accounts` with `account="__inventory__"` and record all observed cards.
+   If already signed in, resume that account's checkpoint with `status` first.
+2. For each unprocessed account call `status`, then follow its returned
+   `next_action`. Use the table below; do not restart a fixed sequence after a
+   failure. A verified account ID takes precedence over a matching display name.
+3. After verified `logged_out`, enumerate the chooser again and process the next
+   unprocessed card. Only advance when the chooser is actually reachable.
+4. Close/save the profile after its accounts are completed or recorded as
+   blocked/skipped, then open the next requested profile. A close/save error
+   retains ownership: do not open another profile or claim saving succeeded.
 
-```js
-return await facebookPages.prepare({
-  run_id: RUN_ID,
-  account: ACCOUNT,
-  page_name: PAGE_NAME,
-  bio: BIO,
-  password: TASK_PASSWORD
-});
-```
+| Current stage / returned action | Do this |
+| --- | --- |
+| `started` / `login` | Supply observed `account_name`, verified `account_id` when available, and runtime password. The tool verifies the matching password form and actual signed-in identity. |
+| `signed_in` / `wait_home` | Wait the required 20 seconds and dismiss supported alerts. |
+| `home_ready` / `browse` | Repeat default 60-second chunks: **Home 60 seconds -> Reels 60 seconds -> Home 60 seconds**. Follow remaining progress. |
+| `browsed` / `open_form` | Open Facebook Page creation. |
+| `form_open` / `wait_form` | Wait another 20 seconds for alerts. |
+| `form_ready` / `fill` | Supply stable `page_name`, observed/valid `category`, optional `bio`; select its category suggestion. |
+| `submission_reserved` / `create` | Call `create` once. The tool validates actionability and identity, journals the attempt, then clicks. |
+| `submitting` / `confirm` | Confirm actual creation. Never call Create again, including after a timeout. |
+| `created` / `home` | Return Home after verified success. |
+| `browse_after` | Browse Home for 30 seconds; one default chunk is capped to the remaining time. |
+| `logout` | Log out and verify the saved-account chooser. |
+| `logged_out` | Completed; do not create another Page for this account. |
+| `inspect` / `mfa_required` | Inspect once, record the external challenge or exact blocker; do not bypass it. |
 
-Replace uppercase variables with task values in the invocation, without storing
-the password in an external file. Keep default `dismiss_overlays=true`; the
-Sign in as credential chooser is distinct from the Facebook password form.
+The browse tool varies scroll distances, directions, and pauses across short,
+medium, and long ranges. Reels has longer viewing pauses. It follows an observed
+Reels link and requires a visible video; Home cannot substitute for missing
+Reels. Missing/blocked Reels navigation returns a blocker and preserves completed
+Home time. Browsing performs no likes, comments, shares, or follows.
 
-Preparation verifies an already-signed-in account using its identity and matching
-self-profile link, or selects the saved card once and waits up to 60 seconds for
-password/remembered login to finish. It scrolls/plays the feed for 30 seconds
-(tries an observed Reels/Videos link once if the home feed has no playback),
-fills the Page form, waits through the configured post-fill settling delay,
-verifies it is ready, and saves `submission_reserved` without creating the Page. The
-bundled runner defaults to a 30-second browse with no post-fill delay and no
-post-creation home-feed scroll;
-override `browse_seconds` and `post_fill_delay_ms` deliberately when needed. If the user
-changes the browsing requirement, adapt that step deliberately rather than
-claiming it occurred. No observed playback means pause for one focused inspection.
+Target approximately 5-6 minutes per account from login through verified logout,
+excluding profile startup. Required waits/browsing total 250 seconds. Navigation,
+login and model/tool overhead can exceed the target; report actual elapsed time.
+Do not shorten requested waits, invent success, or add sleeps between tool calls.
 
-If preparation returns `mfa_required`, record that account as skipped, leave its
-checkpoint intact, and continue with the next saved account or GoLogin profile.
+## Popups, recovery, and uncertain actions
 
-If `submission_reserved`, second call:
+The bridge checks browser chrome before and after actions and monitors long
+steps. Results include `browserDialogs` and `nativeDialogsDismissed`. Supported
+Sign in as credential choosers, notification prompts, and page JS alerts are
+handled separately from Facebook password forms. A blocked/unavailable popup
+inspector stops interaction. Unknown native dialogs require inspection; do not
+click behind them or close arbitrary controls.
 
-```text
-browser_script:
-  port: N
-  timeout: 180
-  submission: {run_id: RUN_ID, account: ACCOUNT}
-  code: return await facebookPages.finish({run_id: RUN_ID, account: ACCOUNT, page_name: PAGE_NAME});
-```
+After an error or lost response, call `status` with the **same IDs**. Consider
+`current_state`, `live_login`, checkpoint stage, and popup result together.
+`loginObservation` describes a prior attempt and can be stale.
 
-The submission argument checks actionability first, journals the attempt, and
-clicks Create Page's button role once (works for `div[role="button"]`). The runner
-then waits for the exact delayed success notice, accepts the optional wizard's
-beforeunload, logs out through the account menu, and verifies the chooser returns.
-Continue to the next account only after `logged_out`.
+- A matching open password form with `loginSubmitted=false` resumes `login`
+  with the runtime password. `retry_login` permits one stalled card selection
+  retry only when its guard proves no password submission or active identity.
+- A submitted login resumes waiting/inspection, never password replay. Use
+  `correct_password` only once for an explicitly supplied correction after
+  rejection or its supported stable-chooser recovery; never guess passwords.
+- A verified signed-out chooser during precreation can resume the same account
+  using `login` and its verified ID. Completed progress is retained and a fresh
+  20-second alert settle is required after successful reauthentication.
+- If status returns `home` because the creation form opened too early, return
+  Home and finish browsing. If it returns `open_form` after navigation loss,
+  reopen/settle/fill; completed browsing is retained.
+- `submitting` allows confirmation only. `created` allows completion/logout.
+  Missing success evidence, a disabled button, a search match, or a Page error
+  does not permit another Create click. Capture exact success notice or observed
+  Page identity; leave URL/ID unknown when not exposed.
+- Preserve historical journals. Do not change run/account IDs to escape guards.
+  An explicit user request to redo precreation permits `restart_from_run` only
+  with the same verified ID and signed-out chooser. Reserved, submitting,
+  created, and logged-out accounts cannot be restarted this way.
+- After one focused inspection/correction, record an unresolved blocker. Skip
+  missing credentials, MFA/CAPTCHA, restrictions, or unsupported UI accurately.
+  Continue accounts only if the chooser is reachable; otherwise save/close the
+  blocked profile and record its remaining work before advancing.
 
-For a multi-profile batch, call `browser_profiles` once, iterate the returned
-GoLogin profiles one at a time, and close each profile with `browser_close` only
-after its account list is exhausted. At the start of every profile, enumerate all
-visible saved-account cards and create a work item for each one. After each
-account reaches `logged_out` or `mfa_required`, inspect the chooser again and
-continue until there are no unprocessed account cards left. Never advance to the
-next GoLogin profile after creating only the first Page, and never call
-`browser_close` while another saved account remains. Then open the next profile
-and reuse the same workflow. A profile is complete only when every observed
-account is terminal (`logged_out` or `mfa_required`) or the chooser is verified
-empty.
+Report verified Pages and logout, blocked/pending accounts, captured evidence,
+and actual elapsed times. Do not call a filled form or pending logout complete.
 
-### Batch todo file
+For callers explicitly requesting the older scripted prepare/finish mode only,
+read [references/legacy-runner.md](references/legacy-runner.md). It is not the
+structured agent workflow above.
 
-The loop above is long enough to lose your place on a restart. Track it in
-`runs/facebook-batch-todo.json` (local-only, gitignored) with the helper at
-[scripts/batch-todo.js](scripts/batch-todo.js). It stores profile/account
-statuses only — never passwords. `missing_password` and `mfa_required` are the
-only allowed skip reasons.
-
-```text
-node skills/facebook-create-pages/scripts/batch-todo.js init --file runs/facebook-batch-todo.json --batch B1 --profiles config/gologin-profiles.json
-node skills/facebook-create-pages/scripts/batch-todo.js add-accounts --file runs/facebook-batch-todo.json --profile-id <id> --accounts '[{"account":"Name","page_name":"Page"}]'
-node skills/facebook-create-pages/scripts/batch-todo.js next --file runs/facebook-batch-todo.json
-node skills/facebook-create-pages/scripts/batch-todo.js mark --file runs/facebook-batch-todo.json --profile-id <id> --account Name --status logged_out
-node skills/facebook-create-pages/scripts/batch-todo.js status --file runs/facebook-batch-todo.json
-```
-
-Protocol: init once per batch, add-accounts when a profile's cards are
-enumerated, next before starting work, mark after each account reaches a
-terminal stage (`logged_out`, or `skipped` with `missing_password` /
-`mfa_required`). A profile is done only when the todo file says so.
-
-## Resume and unexpected UI
-
-- `logged_out`: account complete; do not create again.
-- `mfa_required`: two-step verification is required; skip this account and continue the batch.
-- `created`: run `facebookPages.finish` WITHOUT `submission` to finish logout.
-- `submitting`: run `facebookPages.finish` WITHOUT `submission` to confirm and
-  log out. If the notice is gone, inspect the actual Page identity once and use
-  an observed confirmation selector/URL/ID. An unchanged URL, disabled button,
-  search match, or "already manage a Page" error does not authorize another click.
-- `submission_reserved`: inspection does not consume it. A missing selector
-  fails before clicking, so correct it once and retry the submission argument.
-- Other stages: correct the observed problem and retry preparation with the SAME
-  run ID/account. Never erase checkpoints or generate new IDs to bypass a lock.
-
-Never manually seed `accountId` to skip login. If the self-profile link cannot
-verify the requested account, inspect once; an `account_id` supplied by the user
-or verified in that inspection may be passed in config. The cookie must match it.
-A login already selected/submitted resumes waiting without repeating the action.
-
-Selector overrides in the runner are only for demonstrated UI changes:
-`account_selector`, `name_selector`, `category_selector`,
-`option_selector`, `bio_selector`, `create_selector`; finish accepts `confirmation`
-and `logout` options from the workflow helpers. Pass `create_selector` in the
-submission argument as `selector` too. Do not guess selectors or URLs.
-For externally opened profiles, keep a stable non-secret `checkpoint_scope` on
-all calls; profiles opened by this MCP server use the GoLogin ID automatically.
-If an older checkpoint lacks `accountId`, inspect identity before migrating it;
-never infer that it is the currently signed-in account.
-
-Stop after one focused inspection/correction if the issue remains unresolved.
-Hand off MFA/CAPTCHA/account restrictions or unsupported native dialogs. Never
-bypass creation guards with a manual click, probe hidden APIs, clear cookies, or
-perform a logout URL experiment. Batch known steps rather than narrate each click.
-
-If login stalls, report the runner's `loginObservation` and any tool warnings.
-Saved-account cards are not proof of live sessions; an absent identity cookie
-and unchanged page do not prove expired sessions or restrictions. A native-dialog
-connection warning means DOM inspection cannot rule out a browser-owned popup.
-Inspect the visible browser once (including browser chrome), or hand off that
-inspection when unavailable. Do not click behind a suspected native popup, test
-other accounts to generalize the failure, or describe untested accounts as blocked
-by a proven account-specific cause. Preserve the same run and checkpoints.
-
-## Finish
-
-Call `browser_close` to save the GoLogin profile. Report each account's Page name,
-confirmed stage, captured Page URL/ID when available, and unfinished work. Include
-elapsed time and the returned `timings` (login, browsing, navigation, fill,
-confirmation, logout); do not call pending creation or pending logout complete.
-
-### Current GoLogin registry
-
-The checked-in snapshot at `config/gologin-profiles.json` records the current
-29-profile name/ID mapping after the Ban Profiles workspace was deleted. Use the
-exact ID from the live `browser_profiles` response when opening a profile; use the
-registry as a readable reference and detect/report any live changes instead of
-falling back to a name when duplicate names exist.
+The legacy runner also retains the read-only `primaryLocation` helper and
+[scripts/batch-todo.js](scripts/batch-todo.js). See the legacy reference for
+those APIs; structured jobs use `browser_facebook_run` for durable progress.

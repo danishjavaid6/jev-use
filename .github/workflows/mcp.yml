@@ -16,6 +16,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      - uses: pnpm/action-setup@v4
+        with:
+          version: '10'
+      - run: pnpm install --frozen-lockfile --ignore-scripts
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -25,10 +29,10 @@ jobs:
       - if: runner.os != 'Windows'
         run: .venv/bin/python -m pip install -e ".[dev]"
       - if: runner.os == 'Windows'
-        run: .venv\Scripts\python.exe -m pytest tests/test_mobile_mcp.py -q
+        run: .venv\Scripts\python.exe -m pytest tests/test_mobile_mcp.py tests/test_facebook_pages_tools.py tests/test_facebook_runs.py tests/test_betterwright.py tests/test_gologin.py -q
       - if: runner.os != 'Windows'
-        run: .venv/bin/python -m pytest tests/test_mobile_mcp.py -q
-      - run: node --test test/mcp-probe.test.js test/native-dialogs.test.js test/workflow-helpers.test.js test/facebook-pages-runner.test.js
+        run: .venv/bin/python -m pytest tests/test_mobile_mcp.py tests/test_facebook_pages_tools.py tests/test_facebook_runs.py tests/test_betterwright.py tests/test_gologin.py -q
+      - run: pnpm test
       - if: runner.os == 'Windows'
         shell: pwsh
         run: |

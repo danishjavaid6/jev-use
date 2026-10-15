@@ -72,6 +72,8 @@ from . import facebook_flow_state
 from . import gologin
 from . import harness
 from . import betterwright
+from . import facebook_pages
+from . import facebook_runs
 
 SERVER_NAME = "jev-use"
 SERVER_VERSION = "0.3.0"
@@ -160,6 +162,7 @@ _SESSION: dict[str, Any] = {"driver": None, "target": None, "profile": None}
 #: stop it: the SDK commits cookies and login state back to GoLogin on stop, so a
 #: profile that is never stopped loses everything the session did.
 _GOLOGIN: dict[str, Any] = {"session": None}
+_FACEBOOK_RUN_ID: str | None = None
 
 
 def _close_session_locked() -> None:
@@ -309,7 +312,13 @@ PROMPT_NAME = "browser-use"
 PROMPT_TEMPLATE = """Task: {task}
 Call browser_profiles once; reuse the matching port or browser_open the requested profile.
 For a known URL use browser_read(port=N, url=...) directly. For several URLs use
-browser_read_many. For one exact click/fill/scroll use browser_action. For any
+browser_read_many. For Facebook Page creation first restore/start browser_facebook_run
+with exactly the profiles selected in the user's instruction, then use browser_facebook
+structured actions and follow next_action; the agent drives every account/profile loop.
+Keep the same run_id/account across retries. Use status after a lost response;
+submitting requires confirm, never a second create. Browse Home60, Reels60, Home60
+before creation and Home30 afterward; both alert waits are 20 seconds.
+For one exact click/fill/scroll use browser_action. For other
 repeated account, login, form, wizard, or checkout workflow, MUST use one
 browser_script call per account with a prepared BetterWright Playwright snippet;
 do not spend a model turn on every click and do not switch to agent-browser.
@@ -324,7 +333,10 @@ explicitly open Profile 1 first (never API/newest-first), then map passwords to 
 skip accounts beyond the password list or at MFA. Exhaust every saved Facebook
 account in the current profile and verify the chooser has no unprocessed cards
 before closing it; only then continue to the next profile.
-If tools are missing, search once then use `jev-use call <tool>` in the shell.
+GoLogin multi-call jobs require a persistent MCP connection: the one-shot CLI
+stops a profile it opened when it exits. If those tools are missing, report the
+connection problem; do not create holder scripts. For other tasks, search once
+then use `jev-use call <tool>` in the shell.
 Do not build clients or debug the installation during the task. Retry once at
 most; report failures and stop. Quote only what you read.
 """
@@ -435,6 +447,8 @@ def prompt_messages(name: str, arguments: dict[str, Any]) -> dict[str, Any] | No
 # -- tools ------------------------------------------------------------------
 
 TOOLS: list[dict[str, Any]] = [
+    facebook_pages.SCHEMA,
+    facebook_runs.SCHEMA,
     {
         "name": "browser_profiles",
         "description": "List running browsers and saved profiles. Call FIRST, once; reuse a matching live CDP port.",
@@ -471,6 +485,7 @@ TOOLS: list[dict[str, Any]] = [
                     "description": "CDP port; use the port returned by browser_open.",
                 },
                 "url": {"type": "string", "description": "Page to open. Default about:blank."},
+                "run_id": {"type": "string", "description": "Facebook batch run_id: enforce its saved profile range before launching GoLogin."},
                 "headless": {
                     "type": "boolean",
                     "default": False,
@@ -941,14 +956,26 @@ def tool_browser_profiles(args: dict[str, Any]) -> str:
 
 def _open_gologin(wanted: str, args: dict[str, Any]) -> str:
     """Launch a GoLogin profile in its own browser and report the CDP port."""
+    global _FACEBOOK_RUN_ID
     try:
         match = gologin.find(wanted)
     except gologin.GoLoginError as exc:
         return str(exc)
 
+    run_id = args.get("run_id") or _FACEBOOK_RUN_ID
+    if run_id:
+        facebook_runs.guard_profile(str(run_id), match.id)
+        _FACEBOOK_RUN_ID = str(run_id)
+
     existing = _GOLOGIN.get("session")
     if existing is not None and existing.profile.id == match.id and cdp_alive(existing.port):
         return f"GoLogin profile {match.name!r} is already open and drivable on port {existing.port}."
+    if existing is not None:
+        raise gologin.GoLoginError(
+            f"GoLogin profile {existing.profile.name!r} is still owned by this server. "
+            "Finish its accounts and call browser_close to save it before opening another profile. "
+            "If its browser disconnected, inspect its checkpoint and close/save the owned session first."
+        )
 
     url = str(args.get("url") or "").strip()
     try:
@@ -962,6 +989,8 @@ def _open_gologin(wanted: str, args: dict[str, Any]) -> str:
         return str(exc)
 
     _GOLOGIN["session"] = session
+    if run_id:
+        facebook_runs.record_profile(str(run_id), match.id, session.port, "opened")
     transport = (
         "browser-harness CDP transport (one websocket, no per-call driver spawn)"
         if harness.available()
@@ -1031,14 +1060,23 @@ def tool_browser_close(args: dict[str, Any]) -> str:
     session = _GOLOGIN.get("session")
     if session is None:
         return "no GoLogin profile was started by this server, so there is nothing to close."
-    _GOLOGIN["session"] = None
     try:
         session.stop()
-    except Exception as exc:  # noqa: BLE001 - report whatever the SDK raises
-        return f"could not stop the GoLogin profile {session.profile.name!r}: {exc}"
+    except Exception:  # Backend exceptions can contain credential-bearing data.
+        raise gologin.GoLoginError(
+            f"Could not stop/save GoLogin profile {session.profile.name!r}; ownership retained. "
+            "Inspect the session before continuing; saving and closure are not confirmed."
+        ) from None
+    _GOLOGIN["session"] = None
+    state_warning = ""
+    if _FACEBOOK_RUN_ID:
+        try:
+            facebook_runs.record_profile(_FACEBOOK_RUN_ID, session.profile.id, None, "closed_saved")
+        except Exception:
+            state_warning = " Run-state update failed; inspect the saved run before resuming."
     return (
         f"stopped GoLogin profile {session.profile.name!r}; its cookies and login "
-        "state are saved back to GoLogin."
+        "state are saved back to GoLogin." + state_warning
     )
 
 
@@ -1179,6 +1217,79 @@ def tool_browser_read_many(args: dict[str, Any]) -> str:
     return header + "\n\n" + "\n\n---\n\n".join(blocks)
 
 
+def tool_browser_facebook_run(args: dict[str, Any]) -> str:
+    """Read or update local run state; never launch or navigate a browser."""
+    global _FACEBOOK_RUN_ID
+    if set(args) - set(facebook_runs.SCHEMA["inputSchema"]["properties"]):
+        raise ValueError("Unsupported run-state arguments; never supply credentials here")
+    action = args.get("action")
+    if action != "start" and any(key in args for key in ("profile_start", "profile_end", "profile_numbers", "profile_ids")):
+        raise ValueError("A new profile selection requires start with a separate scoped run; resume retains its saved selection")
+    if action == "start":
+        state = facebook_runs.start(args.get("run_id"), args.get("profile_start"),
+                                    args.get("profile_end"), gologin.profiles(),
+                                    profile_numbers=args.get("profile_numbers"), profile_ids=args.get("profile_ids"))
+    elif action == "status":
+        state = facebook_runs.status(args.get("run_id") or _FACEBOOK_RUN_ID)
+    elif action in {"pause", "resume"}:
+        state = facebook_runs.transition(args.get("run_id") or _FACEBOOK_RUN_ID, action)
+    else:
+        raise ValueError("Unknown run-state action")
+    _FACEBOOK_RUN_ID = None if action == "pause" else state["run_id"]
+    return json.dumps(state, ensure_ascii=False)
+
+
+def tool_browser_facebook(args: dict[str, Any]) -> str:
+    """Expose bounded structured actions, never caller-authored scripts."""
+    global _FACEBOOK_RUN_ID
+    # Some harnesses deliver JSON numbers as strings; coerce them before the
+    # strict validation, the way _port handles every other browser tool.
+    for key in ("port", "seconds"):
+        if isinstance(args.get(key), str):
+            try:
+                args[key] = int(args[key])
+            except ValueError:
+                pass
+    options = facebook_pages.request(args)
+    owner = _GOLOGIN.get("session")
+    if owner is None or owner.port != args["port"]:
+        raise ValueError("Open the requested GoLogin profile on this MCP connection first; a port alone does not verify run scope")
+    expected_scope = "gologin:" + owner.profile.id
+    if args.get("checkpoint_scope", expected_scope) != expected_scope:
+        raise ValueError("Checkpoint scope must match the owned GoLogin profile")
+    options["checkpoint_scope"] = expected_scope
+    token = facebook_runs.begin_action(args["run_id"], owner.profile.id, args["account"], args["action"], args)
+    _FACEBOOK_RUN_ID = args["run_id"]
+    try:
+        if args["action"] == "tabs":
+            # Read-only inventory; omit URL queries/fragments and browser titles.
+            from urllib.parse import urlsplit, urlunsplit
+            tabs = []
+            for tab in betterwright.list_tabs(args["port"]):
+                parsed = urlsplit(tab.get("url", ""))
+                tabs.append({"target_id": tab["id"], "url": urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))})
+            result = json.dumps({"tabs": tabs}, ensure_ascii=False)
+        else:
+            result = facebook_pages.compact_response(tool_browser_script(options))
+    except Exception:
+        facebook_runs.finish_action(args["run_id"], token, False)
+        if args.get("password"):
+            # Backend traces can quote fill arguments or transport payloads.
+            raise betterwright.BetterWrightError(
+                "Facebook login failed; inspect status and the browser. Secret-bearing diagnostics omitted."
+            ) from None
+        raise
+    checkpoint = None
+    cards = None
+    if result.startswith("port="):
+        checkpoint = json.loads(result.split("\n", 1)[1]).get("result")
+        if isinstance(checkpoint, dict) and "checkpoint" in checkpoint:
+            cards = checkpoint.get("cards") or [{"name": name} for name in checkpoint.get("accounts", [])]
+            checkpoint = checkpoint["checkpoint"]
+    facebook_runs.finish_action(args["run_id"], token, True, checkpoint if isinstance(checkpoint, dict) else None, cards)
+    return result
+
+
 def tool_browser_script(args: dict[str, Any]) -> str:
     """Run a deterministic BetterWright script without invoking Jev per action."""
     port = _port(args)
@@ -1191,7 +1302,8 @@ def tool_browser_script(args: dict[str, Any]) -> str:
     # Detach our legacy transport, retaining its explicitly chosen workflow tab.
     target = _SESSION.get("target")
     page_url = args.get("page_url")
-    if not page_url and target is not None and target.port == port:
+    page_target_id = args.get("page_target_id")
+    if not page_url and not page_target_id and target is not None and target.port == port:
         hint = target.url_hint or ""
         if hint.startswith("target:"):
             with betterwright.urllib.request.urlopen(f"http://127.0.0.1:{port}/json/list", timeout=5) as response:
@@ -1200,6 +1312,7 @@ def tool_browser_script(args: dict[str, Any]) -> str:
             if len(matches) != 1:
                 raise betterwright.BetterWrightError("Workflow tab disappeared; inspect tabs before continuing")
             page_url = matches[0]["url"]
+            page_target_id = matches[0]["id"]
     reset_browser_session()
     code = str(args.get("code") or "")
     if args.get("dismiss_overlays", True):
@@ -1209,6 +1322,10 @@ def tool_browser_script(args: dict[str, Any]) -> str:
         options["dismiss_overlays"] = False
     if page_url:
         options["page_url"] = page_url
+    if page_target_id:
+        options["page_target_id"] = page_target_id
+    if args.get("facebook_workflow"):
+        options["facebook_workflow"] = True
     owner = _GOLOGIN.get("session")
     scope = args.get("checkpoint_scope")
     if not scope and owner is not None and owner.port == port:
@@ -1421,6 +1538,8 @@ def tool_android_location(args: dict[str, Any]) -> str:
 
 
 HANDLERS = {
+    "browser_facebook": tool_browser_facebook,
+    "browser_facebook_run": tool_browser_facebook_run,
     "browser_profiles": tool_browser_profiles,
     "browser_open": tool_browser_open,
     "browser_close": tool_browser_close,
@@ -1505,7 +1624,7 @@ def handle(request: dict[str, Any]) -> dict[str, Any] | None:
                 "id": request_id,
                 "result": {"content": text if isinstance(text, list) else [{"type": "text", "text": text}]},
             }
-        except (DriverError, betterwright.BetterWrightError) as exc:
+        except (DriverError, betterwright.BetterWrightError, gologin.GoLoginError) as exc:
             # A driver refusal is an operational message, not a crash: return it as
             # text so the caller acts on it instead of seeing a stack trace.
             return {

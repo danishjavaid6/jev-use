@@ -12,8 +12,10 @@ function fixture(videoPresent = true) {
   const sandbox = { state: {}, dialogs: { acceptNext: async () => {} }, Date: { now: () => now }, page: {
     mouse: { wheel: async () => {} },
     waitForTimeout: async ms => { now += ms; },
+    getByText: () => ({ first() { return this; }, waitFor: async () => {} }),
     locator: () => ({ first() { return this; }, nth() { return this; }, count: async () => videoPresent ? 1 : 0,
       evaluate: async callback => callback(video), click: async options => { if (!options?.trial) clicks++; },
+      innerText: async () => 'Fixture Account',
       filter() { return this; }, waitFor: async () => {} })
   } };
   vm.runInNewContext(source + '\nglobalThis.workflow = workflow;', sandbox);
@@ -27,7 +29,7 @@ test('requires thirty seconds of observed playback before reserving creation', a
   const browsing = await workflow.browseFeed();
   assert.equal(browsing.elapsedMs, 30000);
   assert.equal(browsing.playingObserved, true);
-  assert.equal(browsing.scrolls, 10);
+  assert.ok(browsing.scrolls >= 5 && browsing.scrolls <= 25, `expected uneven pacing, got ${browsing.scrolls} scrolls`);
   workflow.beforeCreate('Test Page');
   assert.equal(workflow.status().stage, 'submission_reserved');
   await assert.rejects(workflow.submitCreation({ selector: 'button' }), /submission=/);
@@ -184,6 +186,78 @@ test('navigation waits for commit instead of the slow SPA load event', async () 
   f.dialogs.acceptNext=async()=>{accepted=true;};
   f.page.goto=async (url,options)=>{assert.equal(accepted,true);assert.equal(options.waitUntil,'commit');assert.equal(options.timeout,45000);return url;};
   assert.equal(await f.workflow.navigate('https://www.facebook.com/'),'https://www.facebook.com/');
+});
+
+test('feed browsing supports the full three-minute randomized pass', async () => {
+  const f = fixture();
+  f.workflow.begin('long-browse', 'account');
+  const browsing = await f.workflow.browseFeed({ seconds: 180, discoverVideoSurface: true });
+  assert.equal(browsing.elapsedMs, 180000);
+  assert.equal(browsing.playingObserved, true);
+  assert.equal(f.workflow.status().stage, 'browsed');
+  await assert.rejects(f.workflow.browseFeed({ seconds: 181 }), /0–180/);
+});
+
+test('alert settling watches the full window without touching content', async () => {
+  const f = fixture();
+  const settled = await f.workflow.settleAlerts({ seconds: 20 });
+  assert.equal(settled.settledMs, 20000);
+  assert.equal(settled.promptsDismissed, 20);
+  await assert.rejects(f.workflow.settleAlerts({ seconds: 61 }), /0–60/);
+});
+
+test('saved-account enumeration lists chooser cards read-only', async () => {
+  const f = fixture();
+  const names = ['Hamayon Khan', 'Amir Khan', 'Dipes Bhujel'];
+  f.page.locator = () => ({ count: async () => names.length, nth: index => ({ innerText: async () => names[index] }) });
+  f.workflow.begin('enumerate', 'account');
+  assert.deepEqual([...await f.workflow.listSavedAccounts()], names);
+  assert.equal(f.workflow.status().stage, 'started');
+});
+
+test('saved-account matching distinguishes names and escapes punctuation', () => {
+  const { workflow } = fixture();
+  const matcher = workflow.exactAccountName('Ali Khan (Work)');
+  assert.equal(matcher.test('  Ali\nKhan (Work)  '), true);
+  assert.equal(matcher.test('Ali Khan (Work) Extra'), false);
+  assert.equal(workflow.exactAccountName('Ali').test('Ali Khan'), false);
+});
+
+test('duplicate account names require an observed matching public ID before selection', async () => {
+  const f = fixture();
+  const cards = [{ ids: ['123'] }, { ids: ['456'] }];
+  f.page.getByRole = () => ({ filter() { return this; }, count: async () => cards.length, nth: index => cards[index] });
+  f.workflow.publicAccountIds = async card => card.ids;
+  await assert.rejects(f.workflow.savedAccountCard({ accountName: 'Ali' }), /Multiple saved accounts/);
+  await assert.rejects(f.workflow.savedAccountCard({ accountName: 'Ali', accountId: '999' }), /Multiple saved accounts/);
+  assert.equal(await f.workflow.savedAccountCard({ accountName: 'Ali', accountId: '456' }), cards[1]);
+});
+
+test('card metadata exposes public IDs only from its own Facebook profile links', async () => {
+  const f = fixture();
+  const sandbox = { state: {}, URL, location: { href: 'https://www.facebook.com/' } };
+  vm.runInNewContext(source + '\nglobalThis.workflow = workflow;', sandbox);
+  const card = { evaluate: async callback => callback({
+    getAttribute: name => name === 'data-user-id' ? '123' : null,
+    querySelectorAll: () => [
+      { href: 'https://www.facebook.com/profile.php?id=456&unrelated=private' },
+      { href: 'https://outside.test/profile.php?id=999' },
+      { href: 'https://www.facebook.com/login.php?auth=private' },
+    ],
+  }) };
+  const ids = await sandbox.workflow.publicAccountIds(card);
+  assert.deepEqual([...ids], ['123', '456']);
+  assert.ok(!JSON.stringify(ids).includes('private'));
+});
+
+test('an obstructed category suggestion cannot trigger an unverified keyboard selection', async () => {
+  const f = fixture();
+  let keys = 0;
+  f.page.getByRole = () => ({ waitFor: async () => {}, fill: async () => {}, press: async () => keys++, count: async () => 0 });
+  f.page.getByLabel = () => f.page.getByRole();
+  f.page.getByText = () => ({ last() { return this; }, waitFor: async () => {}, click: async () => { throw Error('suggestion obstructed'); } });
+  await assert.rejects(f.workflow.fillPage({ pageName: 'Page', bio: 'Bio' }), /suggestion obstructed/);
+  assert.equal(keys, 0);
 });
 
 test('dismisses a notification-permission dialog through Block, never Allow', async () => {

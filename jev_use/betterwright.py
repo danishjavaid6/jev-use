@@ -83,7 +83,7 @@ for (let noticeIndex = 0; noticeIndex < noticeCount; noticeIndex++) {
 
 INSTALL_HINT = (
     "BetterWright is not installed. With Node.js 22+, install it once with:\n"
-    "    npm install -g betterwright"
+    "    pnpm add -g betterwright"
 )
 
 
@@ -98,6 +98,10 @@ def executable() -> str | None:
         if found:
             return found
     roots: list[Path] = []
+    if os.environ.get("PNPM_HOME"):
+        roots.append(Path(os.environ["PNPM_HOME"]))
+    if os.environ.get("LOCALAPPDATA"):
+        roots.append(Path(os.environ["LOCALAPPDATA"]) / "pnpm")
     for variable in ("APPDATA", "LOCALAPPDATA", "USERPROFILE"):
         value = os.environ.get(variable)
         if value:
@@ -226,6 +230,14 @@ class _Bridge:
 
 
 _BRIDGES: dict[int, tuple[str, _Bridge]] = {}
+_WORKFLOW_TABS: dict[int, tuple[str, str]] = {}
+
+
+def list_tabs(port: int) -> list[dict]:
+    """Inspect local page targets without opening or navigating any tab."""
+    ws_url_for(port)
+    with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/list", timeout=5) as response:
+        return [tab for tab in json.load(response) if tab.get("type") == "page"]
 
 
 def close_sessions() -> None:
@@ -239,7 +251,8 @@ atexit.register(close_sessions)
 
 def run_script(port: int, code: str, *, timeout: float = 120.0,
                command: str | None = None, page_url: str | None = None,
-               dismiss_overlays: bool = True, checkpoint_scope: str | None = None, submission: dict | None = None) -> dict[str, Any]:
+               dismiss_overlays: bool = True, checkpoint_scope: str | None = None, submission: dict | None = None,
+               page_target_id: str | None = None, facebook_workflow: bool = False) -> dict[str, Any]:
     """Reuse BetterWright's SDK connection and in-memory state between calls."""
     if not isinstance(code, str) or not code.strip():
         raise BetterWrightError("browser_script requires non-empty JavaScript code")
@@ -257,20 +270,35 @@ def run_script(port: int, code: str, *, timeout: float = 120.0,
         del _BRIDGES[port]
     target_id = None
     tab_count = None
-    if port not in _BRIDGES or page_url:
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/list", timeout=5) as response:
-            tabs = [t for t in json.load(response) if t.get("type") == "page"]
+    candidates = None
+    if port not in _BRIDGES or page_url or page_target_id:
+        tabs = list_tabs(port)
         tab_count = len(tabs)
         candidates = [t for t in tabs if t.get("url") == page_url] if page_url else tabs
-        if len(candidates) != 1:
+        pin = _WORKFLOW_TABS.get(port)
+        target = page_target_id or (pin[1] if pin and pin[0] == ws and not page_url else None)
+        if target:
+            candidates = [t for t in candidates if t.get("id") == target]
+        elif facebook_workflow and not page_url:
+            facebook_tabs = [t for t in candidates if (urlparse(t.get("url", "")).hostname or "").lower().removeprefix("www.") in {"facebook.com", "m.facebook.com"}]
+            if facebook_tabs:
+                candidates = facebook_tabs
+        if not candidates or (len(candidates) != 1 and not facebook_workflow):
             raise BetterWrightError("Multiple or missing tabs: supply page_url with the exact existing workflow tab URL")
-        target_id = candidates[0]["id"]
-        page_url = candidates[0]["url"]
+        if len(candidates) == 1:
+            target_id = candidates[0]["id"]
+            page_url = candidates[0]["url"]
     if port not in _BRIDGES:
         _BRIDGES[port] = (ws, _Bridge(cli))
     try:
-        return _BRIDGES[port][1].run(
-            {"ws": ws, "cli": cli, "code": code, "timeout": timeout, "page_url": page_url, "target_id": target_id, "tab_count": tab_count, "dismiss_overlays": dismiss_overlays, "checkpoint_scope": checkpoint_scope, "submission": submission}, timeout)
+        result = _BRIDGES[port][1].run(
+            {"ws": ws, "cli": cli, "code": code, "timeout": timeout, "page_url": page_url, "target_id": target_id,
+             "targets": [{"id": t["id"], "url": t.get("url", "")} for t in candidates] if candidates is not None else None,
+             "tab_count": tab_count, "dismiss_overlays": dismiss_overlays, "checkpoint_scope": checkpoint_scope, "submission": submission}, timeout)
+        selected = result.get("workflowAttachment", {}).get("targetId")
+        if selected:
+            _WORKFLOW_TABS[port] = (ws, selected)
+        return result
     except BetterWrightError:
         # Do not reuse a timed-out worker or replay possibly committed actions.
         failed = _BRIDGES.pop(port, None)

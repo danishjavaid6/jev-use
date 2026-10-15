@@ -86,12 +86,126 @@ and generated text require a configured `JEV_USE_TEXT_MODEL`; an unavailable
 planner is skipped. Literal text supplied to `browser_action` needs no writer.
 
 For repeated Facebook Page creation, use `/facebook-create-pages` (or
-`$facebook-create-pages` in Codex). Installation copies its instructions, runner,
-and metadata into the shared and supported harness skill directories. The runner
-is also injected into `browser_script` as `facebookPages`, so the agent calls
-`facebookPages.prepare` and `facebookPages.finish` instead of rewriting the flow.
-It uses the existing GoLogin browser, the requested 30-second feed browsing step,
-and the submission checkpoint protocol. It never stores the task password.
+`$facebook-create-pages` in Codex). The default is the structured
+`browser_facebook` MCP tool: the agent calls actions with JSON arguments and
+owns the account/profile loop. No caller-written JavaScript or batch script is
+needed. Betterwright performs the actions in the existing GoLogin browser;
+Jev's `browser_use` remains available for inspecting unfamiliar controls.
+
+Use the [start/resume prompt](prompts/facebook-pages.md) for the full agent-driven
+batch. Before a new session, run `jev-use doctor`: when GoLogin is configured it
+also checks the Facebook recovery schema, Betterwright CLI/SDK, and Jev inspection
+dependency without launching a browser. Reload the harness's MCP connection after
+upgrading; a successful fresh-launch check does not refresh an older live server.
+
+Open each requested GoLogin profile with `browser_open`, then call these actions:
+
+First restore the saved batch with `browser_facebook_run(action="status")`.
+For a new job, call `browser_facebook_run(action="start", run_id="my-batch",
+profile_start=23, profile_end=29)`. This records only the exact requested range
+and live GoLogin IDs. Pass that `run_id` to `browser_open` and every structured
+Facebook step. Scoped profile opens and structured steps reject profiles outside
+the recorded range. Structured steps require ownership on the same MCP
+connection, so a guessed port cannot bypass the profile check.
+
+The user selects the profiles for each job; 23–29 is only an example. Use
+`profile_numbers=[7]` for one profile, `profile_numbers=[2,7,19]` for a list,
+or `profile_ids=["<observed-id>"]` for custom-named profiles. Supply one selection
+mode. A sparse list never includes the profiles between its entries. A newly
+requested selection takes precedence over the previous batch's saved cursor;
+create a separate scoped job and retain the old journals.
+
+Run state persists outside the workspace under the workflow checkpoint directory
+(`JEV_USE_WORKFLOW_DIR` overrides it). It records the last account/action, partial
+progress, and pending attempts across agent or MCP restarts. `status` reads saved
+state without launching a browser. Use `resume` for an authorized continuation,
+then inspect live account status; use `pause` on stop. A pending attempt is
+uncertain until inspected. The range cannot silently expand under the same run
+ID, and completed or uncertain creation journals are retained.
+
+`accounts → login → wait_home → browse → open_form → wait_form → fill → create → confirm → home → browse_after → logout`
+
+Every call takes `port`, `run_id`, and `account`. Use the same identifiers on
+retries. `accounts` can use `account="__inventory__"`; use an observed account
+identifier for subsequent calls. `login` takes the runtime `password` and
+optional observed `account_name`/verified `account_id`. `fill` takes `page_name`,
+`category`, and optional `bio`. For example, after reaching `form_ready`:
+
+```json
+{"action":"fill","port":9222,"run_id":"my-batch","account":"observed-account","page_name":"My Page","category":"Artist","bio":"Art and illustrations."}
+```
+
+Use the actual returned port. Follow `next_action` in each response. Both wait
+steps last 20 seconds. Repeat `browse` in chunks of at most 60 seconds until
+Home 60 seconds, Reels 60 seconds, then Home 60 seconds have accumulated; repeat
+`browse_after` until 30 seconds of Home browsing have accumulated. Scroll
+distances, directions, and pauses vary, with longer pauses on Reels. An observed
+Reels link and visible video are required; missing Reels cannot count as Home
+scrolling. Progress and remaining time survive reconnects.
+The default 60-second chunk reduces model/tool overhead to three calls before
+creation and one 30-second call afterward. Responses retain the active account's
+checkpoint and popup diagnostics; other accounts' journals remain on disk.
+
+The target is approximately **5–6 minutes per account**, from login through
+verified logout. The requested waits/browsing total 250 seconds; browser work
+and model/tool overhead account for the rest. Facebook delays or account
+challenges can take longer. Do not cut browsing or skip confirmation to meet
+the target.
+
+GoLogin requires the persistent MCP server. Do not use the one-shot
+`jev-use call browser_open` fallback for this workflow: process-exit cleanup
+stops the profile before the next CLI call. If the agent cannot see the tools,
+fix/reload the harness MCP connection. OpenCode uses
+`~/.config/opencode/opencode.json` (or `$XDG_CONFIG_HOME/opencode`) on Windows
+too; `opencode debug paths` reports the active location. Restart its session
+after changing the registration or installed skills.
+
+After verified logout, enumerate again and process every remaining account.
+Only then call `browser_close` to save the profile and open the next one. Keep
+a non-secret batch inventory and stable Page names; never place passwords in
+files. Missing credentials and blocked accounts must be recorded as unfinished
+or skipped, not successful. MFA/CAPTCHA may need human handling.
+
+Call `status` after an interrupted call. A `submitting` checkpoint requires
+`confirm`, never another creation attempt. Creation verifies the active account,
+checks the button, and journals the attempt before clicking. Supported Windows
+notification/credential prompts and selected-tab JavaScript dialogs use the
+existing native handlers; inspect any returned native-dialog warning. Unknown
+or localized native UI may need manual dismissal.
+
+The legacy `facebookPages.prepare`/`finish` runner remains available through
+`browser_script` for callers explicitly choosing prepared scripts.
+
+Windows native account choosers are deduplicated by their UI Automation runtime
+IDs, and the bridge waits for the first native-popup inspection before acting.
+After inspecting and dismissing a popup that blocked account selection, use
+`retry_login` once with the same checkpoint if the chooser remains visible and
+no password was submitted. If the password form appeared, resume `login` directly.
+For an explicit user-supplied password correction after Facebook's visible
+incorrect-password notice, `correct_password` permits one corrected submission
+on that account's form while preserving the existing run and creation journal.
+It also handles a verified signed-out account chooser after a profile restart.
+`status.live_login` reports current UI separately from the saved previous login
+observation; `loginFailure.code` supplies non-secret recovery diagnostics.
+When no password has been submitted in the current attempt (`loginSubmitted`
+is false), resume normal `login` with the supplied password even if a correction
+was reserved. `current_state` reports the live page and account mismatch; use it
+with the checkpoint to recover supported navigation instead of restarting the flow.
+
+The native dialog watcher runs throughout the workflow. Before and after each
+structured action it requires a fresh clear popup inspection. Supported browser
+alerts are dismissed; remaining or uninspectable native popups stop progress and
+are reported via `browserDialogs`. Page-owned password forms remain available
+for login. Each SDK attachment has separate bookkeeping so it does not contend
+with an unrelated default Betterwright profile lock.
+
+Precreation sign-outs recover under the same checkpoint and verified account ID,
+preserving completed browsing. Successful reauthentication has a fresh alert
+settle; lost responses never authorize another password or Create submission.
+Exact account names and observed public IDs disambiguate saved cards. A supplied
+verified ID cannot be overridden by a matching display name. Password forms must
+identify the requested account before filling. Stop/save failures retain profile
+ownership and prevent opening another profile over unfinished work.
 
 For a known workflow, `browser_script` runs prepared Playwright through the
 BetterWright SDK, avoiding a model request per click. It uses Node.js 22+ and the
@@ -128,10 +242,11 @@ actions instead of silently queueing duplicate submissions. Attachment errors mu
 
 Prepared scripts expose a checkpointed `workflow` helper for repeated account
 jobs. It supports `workflow.begin`, condition-based login detection,
-`workflow.browseFeed({seconds:90})`, `workflow.beforeCreate`, `workflow.submitCreation`, exact creation
+`workflow.browseFeed({seconds:180})`, `workflow.settleAlerts({seconds:20})`, `workflow.beforeCreate`, `workflow.submitCreation`, exact creation
 confirmation, and `workflow.loggedOut`. Checkpoints are written atomically so a
-timeout or logout failure stops a duplicate submission. The 30-second browsing
-period is used for repeated Facebook Page-creation jobs, and is never added to
+timeout or logout failure stops a duplicate submission. The 3-minute randomized
+browsing period with 20-second alert settles is used for repeated Facebook
+Page-creation jobs, and is never added to
 ordinary browser tasks. The helper reports whether video playback was observed;
 scrolling alone is not reported as successful playback.
 
