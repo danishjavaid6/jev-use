@@ -153,6 +153,49 @@ test('status completes a recovery only on matching identity then requires fresh 
   assert.equal(f.checkpoint.loginRecoveries[0].completedAt, undefined);
 });
 
+test('status reconciles a lost login response only for the exact observed account ID', async () => {
+  const f = fixture();
+  f.checkpoint.loginSubmitted = true;
+  assert.equal((await f.step('status', { account_id: 'account1' })).next_action, 'wait_home');
+  assert.equal(f.checkpoint.accountId, 'account1');
+  assert.equal(f.checkpoint.stage, 'signed_in');
+  const wrong = fixture();
+  assert.equal((await wrong.step('status', { account_id: 'different' })).next_action, 'inspect');
+  assert.equal(wrong.checkpoint.stage, 'started');
+  const neverAttempted = fixture();
+  await neverAttempted.step('status', { account_id: 'account1' });
+  assert.equal(neverAttempted.checkpoint.stage, 'started', 'reading an identity cannot manufacture a login attempt');
+});
+
+test('a mismatched password form recovers once before any password submission', async () => {
+  const f = fixture(); f.setIdentity(null);
+  f.context.page.locator = () => ({ first() { return this; }, isVisible: async () => true });
+  f.context.facebookPages.passwordAccountMatches = async () => false;
+  assert.equal((await f.step('status')).next_action, 'reset_login_view');
+  await f.step('reset_login_view');
+  assert.deepEqual(f.events.at(-1), ['navigate', 'https://www.facebook.com/login/']);
+  assert.equal(f.checkpoint.loginSubmitted, undefined);
+  assert.equal((await f.step('status')).next_action, 'inspect');
+  await assert.rejects(f.step('reset_login_view'), /no submitted password/);
+  const submitted = fixture(); submitted.setIdentity(null);
+  submitted.checkpoint.loginSubmitted = true;
+  submitted.context.page.locator = f.context.page.locator;
+  submitted.context.facebookPages.passwordAccountMatches = async () => false;
+  assert.equal((await submitted.step('status')).next_action, 'inspect');
+  await assert.rejects(submitted.step('reset_login_view'), /no submitted password/);
+});
+
+test('a partially filled precreation form can reauthenticate without changing its Page name', async () => {
+  const f = fixture(); f.setIdentity(null);
+  Object.assign(f.checkpoint, { stage: 'form_ready', accountId: 'known', pageName: 'Stable Page', loginSubmitted: true });
+  f.context.page.getByText = () => ({ first() { return this; }, isVisible: async () => true });
+  f.context.facebookPages.login = async (_options, record) => { record.accountId = 'known'; };
+  assert.equal((await f.step('status')).next_action, 'login');
+  await f.step('login', { account_id: 'known' });
+  assert.equal(f.checkpoint.pageName, 'Stable Page');
+  assert.equal(f.checkpoint.stage, 'form_ready');
+});
+
 test('rejects premature creation flow, account switching and wrong active identity', async () => {
   const f = fixture();
   await assert.rejects(f.step('fill'), /Expected login/);
@@ -170,6 +213,47 @@ test('uncertain submission can only proceed to confirmation', async () => {
   f.checkpoint.stage = 'submitting';
   assert.equal((await f.step('status')).next_action, 'confirm');
   await assert.rejects(f.step('fill', { page_name: 'Another Page' }), /Expected confirm/);
+});
+
+test('another historical reservation allows only a verified different account on a signed-out chooser', async () => {
+  for (const blocked of [false, 'same_id', 'same_name', 'password_form', 'signed_in', 'current_run', 'unknown_id']) {
+    const f = fixture(); f.setIdentity(blocked === 'signed_in' ? 'other' : null);
+    f.context.page.getByText = () => ({ first() { return this; }, isVisible: async () => true });
+    f.context.page.locator = () => ({ first() { return this; }, isVisible: async () => blocked === 'password_form' });
+    const old = { runId: blocked === 'current_run' ? 'stable-run' : 'old', account: blocked === 'same_name' ? 'account1' : 'Other', accountId: blocked === 'same_id' ? 'requested' : 'other', stage: 'submission_reserved', pageName: 'Reserved Page' };
+    f.context.state.jevWorkflow.old = old;
+    const action = f.step('login', { account_id: blocked === 'unknown_id' ? undefined : 'requested' });
+    if (blocked) {
+      await assert.rejects(action, /previous account/);
+      assert.equal(f.checkpoint.loginFailure.code, 'unfinished_account_requires_reconciliation');
+      assert.equal(f.events.some(e => e[0] === 'login'), false);
+    } else await action;
+    assert.equal(old.stage, 'submission_reserved');
+    assert.equal(old.pageName, 'Reserved Page');
+  }
+});
+
+test('a scoped new Page request allows the same account while preserving older journals', async () => {
+  for (const stage of ['started', 'form_ready', 'submission_reserved', 'submitting', 'created', 'logged_out']) {
+    for (const hasId of [false, true]) {
+      const f = fixture(); f.setIdentity(null);
+      const old = { runId: 'old', account: 'account1', stage, pageName: 'Previous Page', ...(hasId ? {accountId: 'requested'} : {}) };
+      const original = JSON.stringify(old);
+      f.context.state.jevWorkflow.old = old;
+      await f.step('login', { account_id: 'requested', new_page_per_account: true });
+      assert.equal(f.events.filter(e => e[0] === 'login').length, 1);
+      assert.equal(JSON.stringify(old), original);
+    }
+  }
+});
+
+test('a new Page request cannot switch unfinished accounts in the same run even without an ID', async () => {
+  for (const hasId of [false, true]) {
+    const f = fixture(); f.setIdentity(null);
+    f.context.state.jevWorkflow.other = { runId: 'stable-run', account: 'other', stage: 'submitting', ...(hasId ? {accountId: 'other'} : {}) };
+    await assert.rejects(f.step('login', { new_page_per_account: true }), /previous account/);
+    assert.equal(f.events.some(e => e[0] === 'login'), false);
+  }
 });
 
 test('a failed scroll does not count unperformed browsing time', async () => {

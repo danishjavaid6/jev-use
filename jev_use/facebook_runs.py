@@ -15,7 +15,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 SCHEMA = {
     "name": "browser_facebook_run",
-    "description": "Persist exactly the profiles selected by the user and their resume context. start accepts a numeric range, profile_numbers list (one item for a single profile), or observed profile_ids. No profiles are selected by default. status reads progress; resume continues that saved selection; pause stops new actions. Never supply passwords here.",
+    "description": "Persist exactly the profiles selected by the user and their resume context. A new authorized run_id requests one additional Page per observed account, even when previous jobs created Pages there. Reusing a run_id or resume continues its existing request without creating extras. start accepts a numeric range, profile_numbers list (one item for a single profile), or observed profile_ids. No profiles are selected by default. status reads progress; pause stops new actions. Never supply passwords here.",
     "inputSchema": {
         "type": "object", "additionalProperties": False,
         "properties": {
@@ -160,6 +160,7 @@ def start(run_id: str, first: int | None, last: int | None, profiles: list, *,
                 raise ValueError("Run scope is immutable; do not change the range or profile IDs under an existing run_id")
             return _view(state)
         state = {"schema_version": 1, "run_id": run_id, "status": "active",
+                 "page_goal": "one_new_page_per_account",
                  "profile_start": first, "profile_end": last, "profiles": selected,
                  "selection": selection,
                  "created_at": time.time(), "cursor": None, "pending_action": None,
@@ -206,6 +207,7 @@ def _checkpoint_summary(run_id: str, account: str, value: dict) -> dict:
 
 def _view(state: dict) -> dict:
     view = json.loads(json.dumps(state))
+    view.setdefault("page_goal", "one_new_page_per_account")
     for profile in view["profiles"]:
         profile["checkpoints"] = []
         for key, value in _journals(profile["id"]).items():
@@ -215,7 +217,7 @@ def _view(state: dict) -> dict:
             cursor = view.get("cursor")
             if cursor and cursor["profile_id"] == profile["id"] and account == cursor["account"] and run_id == state["run_id"]:
                 cursor.update(summary)
-    view["instruction"] = "Stay within these exact profile IDs. Read current browser status before resuming; saved checkpoints describe prior observations, not guaranteed live UI. Never repeat uncertain creation."
+    view["instruction"] = "Stay within these exact profile IDs. This run requests one new Page per observed account; Pages from other runs are retained history, not completion of this run. Resume uses this run's existing checkpoints and must never repeat its uncertain creation. Inspect live state before acting."
     view["resume_action"] = "resume" if state["status"] == "paused" or state.get("pending_action") else "status"
     if state["status"] == "paused" or state.get("pending_action"):
         view["requires_observation"] = True
@@ -251,6 +253,56 @@ def _guard(state: dict, profile_id: str) -> None:
 def guard_profile(run_id: str, profile_id: str) -> None:
     with _locked():
         _guard(_load(run_id), profile_id)
+
+
+def _process_alive(pid: int) -> bool:
+    if type(pid) is not int or pid < 1:
+        return False
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.OpenProcess.restype = wintypes.HANDLE
+        handle = kernel.OpenProcess(0x1000, False, pid)
+        if not handle:
+            return ctypes.get_last_error() == 5  # Access denied is not proof of death.
+        try:
+            code = wintypes.DWORD()
+            kernel.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+            if not kernel.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return True
+            return code.value == 259  # STILL_ACTIVE
+        finally:
+            kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+            kernel.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+        return True
+    except PermissionError:
+        return True
+    except ProcessLookupError:
+        return False
+
+
+def claim_worker(run_id: str, worker_id: str) -> None:
+    """One live MCP process owns a run while operating its GoLogin profile."""
+    with _locked():
+        state = _load(run_id)
+        if state["status"] != "active":
+            raise ValueError("This run is paused; explicit resume is required before browser actions")
+        lease = state.get("worker")
+        if lease and lease["id"] != worker_id and _process_alive(lease["pid"]):
+            raise ValueError("another_worker_owns_run: close/save its owned profile before starting a second agent")
+        state["worker"] = {"id": worker_id, "pid": os.getpid()}
+        _save(state)
+
+
+def release_worker(run_id: str, worker_id: str) -> None:
+    with _locked():
+        state = _load(run_id)
+        if state.get("worker", {}).get("id") == worker_id:
+            state.pop("worker", None)
+            _save(state)
 
 
 def begin_action(run_id: str, profile_id: str, account: str, action: str, details: dict | None = None) -> str:
@@ -338,6 +390,27 @@ def record_profile(run_id: str, profile_id: str, port: int | None, event: str) -
         state["last_profile_event"] = {"profile_id": profile_id, "port": port, "event": event, "at": time.time()}
         if event == "opened":
             state["requires_observation"] = True
+        _save(state)
+
+
+def task_progress(run_id: str, profile_id: str, *, inventoried: bool = False,
+                  completed: bool = False, failure: dict | None = None,
+                  clear_failure: bool = False, workflow_tab: dict | None = None) -> None:
+    """Persist only controller facts, never secrets, tool payloads or exceptions."""
+    with _locked():
+        state = _load(run_id)
+        _guard(state, profile_id)
+        progress = state.setdefault("controller", {}).setdefault(profile_id, {})
+        if inventoried:
+            progress["inventoried"] = True
+        if completed:
+            progress["completed"] = True
+        if clear_failure:
+            progress.pop("failure", None)
+        if failure is not None:
+            progress["failure"] = {k: failure[k] for k in ("account", "action", "stage", "count")}
+        if workflow_tab is not None:
+            progress["workflow_tab"] = {k: workflow_tab[k] for k in ("browser_id", "target_id")}
         _save(state)
 
 

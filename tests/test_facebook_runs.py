@@ -16,6 +16,7 @@ def isolated(monkeypatch, tmp_path):
     monkeypatch.setenv("JEV_USE_WORKFLOW_DIR", str(tmp_path))
     monkeypatch.setattr(mcp_server, "_FACEBOOK_RUN_ID", None)
     monkeypatch.setitem(mcp_server._GOLOGIN, "session", None)
+    monkeypatch.setitem(mcp_server._GOLOGIN, "run_id", None)
 
 
 def profiles():
@@ -29,6 +30,7 @@ def observed(account="Alice"):
 
 def test_exact_range_survives_new_python_process_and_cannot_expand():
     state = runs.start("batch", 23, 29, profiles())
+    assert state["page_goal"] == "one_new_page_per_account"
     assert [p["number"] for p in state["profiles"]] == list(range(23, 30))
     code = "from jev_use.facebook_runs import status; import json; print(json.dumps(status()))"
     saved = json.loads(subprocess.check_output([sys.executable, "-c", code], text=True))
@@ -242,3 +244,24 @@ def test_commit_journal_wins_over_stale_cursor_after_lost_creation_response():
     assert state["pending_action"]["action"] == "create"
     with pytest.raises(ValueError, match="in flight"):
         runs.begin_action("batch", "id-23", "Alice", "create")
+
+
+def test_worker_lease_refuses_a_second_live_process_and_recovers_a_dead_owner(monkeypatch):
+    runs.start("batch", 23, 29, profiles())
+    runs.claim_worker("batch", "first-worker")
+    monkeypatch.setattr(runs, "_process_alive", lambda pid: True)
+    with pytest.raises(ValueError, match="another_worker_owns_run"):
+        runs.claim_worker("batch", "second-worker")
+    runs.release_worker("batch", "second-worker")
+    assert runs.status()["worker"]["id"] == "first-worker"
+    monkeypatch.setattr(runs, "_process_alive", lambda pid: False)
+    runs.claim_worker("batch", "restarted-worker")
+    assert runs.status()["worker"]["id"] == "restarted-worker"
+    runs.release_worker("batch", "restarted-worker")
+    assert "worker" not in runs.status()
+
+
+def test_process_alive_checks_current_and_invalid_pids():
+    import os
+    assert runs._process_alive(os.getpid())
+    assert not runs._process_alive(-1)

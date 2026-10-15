@@ -86,11 +86,67 @@ and generated text require a configured `JEV_USE_TEXT_MODEL`; an unavailable
 planner is skipped. Literal text supplied to `browser_action` needs no writer.
 
 For repeated Facebook Page creation, use `/facebook-create-pages` (or
-`$facebook-create-pages` in Codex). The default is the structured
-`browser_facebook` MCP tool: the agent calls actions with JSON arguments and
-owns the account/profile loop. No caller-written JavaScript or batch script is
-needed. Betterwright performs the actions in the existing GoLogin browser;
-Jev's `browser_use` remains available for inspecting unfamiliar controls.
+`$facebook-create-pages` in Codex). The default is `browser_facebook_next`:
+the agent repeatedly calls one tool with a stable run ID. The backend chooses
+the next authorized profile, observed account and bounded action from fresh
+browser state and durable journals. Betterwright performs actions in GoLogin.
+No caller-written JavaScript or batch script is needed.
+
+After starting/resuming the scoped run below, call:
+
+```json
+{"run_id":"my-batch"}
+```
+
+Pass that object to `browser_facebook_next`. On `continue`, repeat its exact
+`next_call`. On `needs_input`, supply the requested runtime password or current
+account's Page details. The common password stays in this MCP process only,
+expires after 30 minutes idle, and is cleared on pause/completion/restart.
+Page details are durable; credentials must be resupplied after restart.
+`needs_resume` requires reading run status and an authorized `resume`.
+`paused` and `blocked` stop the loop; `completed` requires all observed accounts'
+creation evidence, verified logout and profile closure. Repeated failures stop
+after two attempts. Submission guards apply to each job's own Page attempt.
+
+Each new authorized job requests **one additional Page per observed account**
+in exactly the user's selected profiles. Accounts may already have Pages from
+earlier jobs; that history does not complete or block the new request. To create
+another Page in the same accounts, start a new stable `run_id`. To resume an
+interrupted job, retain its existing ID: completed accounts in that job are
+skipped and uncertain submissions are confirmed rather than clicked again.
+Every job keeps separate Page details, confirmation, timing and logout records.
+Older unresolved attempts remain visible in history without being retried or
+silently marked successful. Current progress/results count only this job;
+`history` reports previous confirmed Pages and unresolved creation attempts.
+
+Transient live-status failures are checked up to three times per next-step
+call, with 1s/2s delays and a fresh SDK connection to the exact same tab. An
+unknown UI is reobserved before acting. Recovery keeps the browser, journal and
+submission guards intact; it never replays login, fill, Create or logout.
+`live_status_checks` reports attempts, reconnections and sanitized cause codes.
+Each status attempt has a 25-second deadline. Pause stops further attempts;
+after three failures the controller stops for diagnosis and profile cleanup.
+
+`browser_facebook_vision(run_id="my-batch")` adds experimental, read-only Jev
+1.14 screen classification, popup presence and a possible Close-button box.
+It sends `TypeSafe-Danger-Zone-Images: true`, with the image-capable SDK and
+Pillow supplied by the `live` extra. Viewport screenshots cannot show native
+browser-chrome popups; native dialog handlers remain necessary. Vision does
+not authorize clicks or substitute for account identity/creation evidence.
+
+The lower-level `browser_facebook` actions below remain available for focused
+manual recovery and maintenance; smaller agents should use the next-step tool.
+The controller pins a dedicated tab instead of choosing among restored duplicate
+Facebook tabs. It persists that tab's identity and validates it against the live
+browser on reconnect. Lost creation tabs stop for inspection. A worker lease
+prevents two MCP processes from operating the same run, and raw/low-level
+mutations are refused while the controller owns the profile. Pause and save/close
+before deliberately switching to manual recovery.
+
+Vision reports whether failure occurred during tab selection, screenshot capture,
+or TypeSafe analysis. An opt-in integration test exercises actual Chrome capture
+and the live image API on isolated fixture UI (`JEV_TEST_CHROME` and
+`JEV_TEST_VISION=1`, with `TYPESAFE_API_KEY` in the test process environment).
 
 Use the [start/resume prompt](prompts/facebook-pages.md) for the full agent-driven
 batch. Before a new session, run `jev-use doctor`: when GoLogin is configured it
@@ -98,7 +154,8 @@ also checks the Facebook recovery schema, Betterwright CLI/SDK, and Jev inspecti
 dependency without launching a browser. Reload the harness's MCP connection after
 upgrading; a successful fresh-launch check does not refresh an older live server.
 
-Open each requested GoLogin profile with `browser_open`, then call these actions:
+For lower-level manual control, open each requested profile with `browser_open`.
+For the default next-step mode, the tool opens and closes profiles itself.
 
 First restore the saved batch with `browser_facebook_run(action="status")`.
 For a new job, call `browser_facebook_run(action="start", run_id="my-batch",

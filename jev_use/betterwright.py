@@ -8,6 +8,7 @@ existing debugger websocket and attaches the persistent BetterWright SDK to it.
 from __future__ import annotations
 
 import json
+import hashlib
 import atexit
 import math
 import queue
@@ -233,11 +234,60 @@ _BRIDGES: dict[int, tuple[str, _Bridge]] = {}
 _WORKFLOW_TABS: dict[int, tuple[str, str]] = {}
 
 
+def _pin_workflow_tab(port: int, ws: str, target_id: str) -> None:
+    if _WORKFLOW_TABS.get(port) != (ws, target_id):
+        existing = _BRIDGES.pop(port, None)
+        if existing:
+            existing[1].close()
+    _WORKFLOW_TABS[port] = (ws, target_id)
+
+
+def workflow_tab(port: int, saved: dict | None = None, *, create: bool = False,
+                 preserve_creation: bool = False) -> dict:
+    """Pin a dedicated task tab; never choose among unrelated duplicate URLs.
+
+    Saved target IDs are observations, validated against this live browser's
+    websocket fingerprint. A lost submission tab requires explicit inspection.
+    """
+    ws = ws_url_for(port)
+    browser_id = hashlib.sha256(ws.encode()).hexdigest()
+    tabs = list_tabs(port)
+    if saved and saved.get("browser_id") == browser_id:
+        target = next((t for t in tabs if t["id"] == saved.get("target_id")), None)
+        if target:
+            _pin_workflow_tab(port, ws, target["id"])
+            return {"browser_id": browser_id, "target_id": target["id"], "created": False}
+    pin = _WORKFLOW_TABS.get(port)
+    if pin and (preserve_creation or not create) and pin[0] == ws and any(t["id"] == pin[1] for t in tabs):
+        return {"browser_id": browser_id, "target_id": pin[1], "created": False}
+    if preserve_creation:
+        raise BetterWrightError("creation_tab_unavailable: preserve the pending Page attempt and inspect its original tab")
+    if not create:
+        raise BetterWrightError("workflow_tab_unavailable: prepare the run's dedicated tab before inspection")
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{port}/json/new?https://www.facebook.com/", method="PUT")
+    with urllib.request.urlopen(request, timeout=10) as response:
+        target = json.load(response)
+    if not isinstance(target.get("id"), str) or target.get("type") != "page":
+        raise BetterWrightError("workflow_tab_creation_failed: debugger did not return a page target")
+    _pin_workflow_tab(port, ws, target["id"])
+    return {"browser_id": browser_id, "target_id": target["id"], "created": True}
+
+
 def list_tabs(port: int) -> list[dict]:
     """Inspect local page targets without opening or navigating any tab."""
     ws_url_for(port)
     with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/list", timeout=5) as response:
         return [tab for tab in json.load(response) if tab.get("type") == "page"]
+
+
+def reconnect_workflow(port: int, saved: dict | None = None) -> dict:
+    """Reconnect our SDK client to the exact live tab, retaining browser/journals."""
+    tab = workflow_tab(port, saved, create=False)
+    existing = _BRIDGES.pop(port, None)
+    if existing:
+        existing[1].close()
+    return tab
 
 
 def close_sessions() -> None:

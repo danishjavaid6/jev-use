@@ -1,12 +1,13 @@
 """Structured, agent-driven Facebook actions backed by the persistent bridge."""
 import json
 
-ACTIONS = ["tabs", "accounts", "status", "retry_login", "correct_password", "login", "wait_home", "browse", "open_form",
+ACTIONS = ["tabs", "accounts", "status", "reset_login_view", "retry_login", "correct_password", "login", "wait_home", "browse", "open_form",
            "wait_form", "fill", "create", "confirm", "home", "browse_after", "logout"]
 SCHEMA = {
     "name": "browser_facebook",
     "description": (
         "One Facebook Page workflow step using Betterwright; no code argument. "
+        "Small agents should prefer browser_facebook_next, which chooses and executes the next step. "
         "Call browser_facebook_run first to restore the authorized profile range and progress. "
         "The agent owns the account/profile loop. Call status for next_action; repeat browse "
         "in chunks up to 60 seconds: Home 60, Reels 60, Home 60 with varied pacing; browse_after Home 30. "
@@ -37,7 +38,7 @@ SCHEMA = {
 }
 
 
-def request(args):
+def request(args, *, new_page_per_account=False):
     """Validate before touching the browser; data is JSON, never executable input."""
     unknown = set(args) - set(SCHEMA["inputSchema"]["properties"])
     if unknown:
@@ -65,9 +66,13 @@ def request(args):
         raise ValueError("correct_password requires the user's corrected runtime password")
     options = {key: args[key] for key in ("port", "page_url", "page_target_id", "checkpoint_scope") if key in args}
     data = {key: value for key, value in args.items() if key not in options}
+    if new_page_per_account:
+        # Internal marker from the scoped MCP boundary, never a caller argument.
+        data["new_page_per_account"] = True
     if args["action"] in {"browse", "browse_after"}:
         data.setdefault("seconds", seconds)
-    options.update(timeout=90, facebook_workflow=True, code="return await facebookAgent.step(" + json.dumps(data) + ");")
+    options.update(timeout=25 if args["action"] == "status" else 90,
+                   facebook_workflow=True, code="return await facebookAgent.step(" + json.dumps(data) + ");")
     if args["action"] == "create":
         options["submission"] = {"run_id": args["run_id"], "account": args["account"], "verify_account": True}
     return options
