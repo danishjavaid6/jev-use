@@ -145,7 +145,7 @@ def test_disconnect_at_each_boundary_resumes_same_job_without_duplicate_pages(br
     else:
         pytest.fail("workflow boundary was not reached")
 
-    monkeypatch.setattr(mcp_server, "_GOLOGIN", {"run_id": "batch"})
+    monkeypatch.setattr(mcp_server, "_GOLOGIN", {"run_id": "batch", "session": browser.session})
     monkeypatch.setattr(mcp_server, "tool_browser_close", lambda _: browser.close())
     mcp_server._pause_disconnected_run()
     mcp_server._close_disconnected_profile()

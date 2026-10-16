@@ -1793,6 +1793,13 @@ def _pause_disconnected_run() -> None:
     run_id = _GOLOGIN.get("run_id") or _FACEBOOK_RUN_ID
     if run_id:
         try:
+            state = facebook_runs.status(run_id)
+            owns_profile = _GOLOGIN.get("session") is not None and _GOLOGIN.get("run_id") == run_id
+            owns_worker = state.get("worker", {}).get("id") == _FACEBOOK_WORKER_ID
+            # A read-only status probe remembers the run ID too. Disconnecting
+            # that observer must never pause another worker's publishing job.
+            if not owns_profile and not owns_worker:
+                return
             facebook_runs.transition(run_id, "pause")
             facebook_task.forget(run_id)
         except Exception:

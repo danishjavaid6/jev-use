@@ -13,6 +13,7 @@ def test_eof_pauses_then_drains_action_before_saving_profile(monkeypatch, read_e
     events = []
     monkeypatch.setattr(server, "load_env", lambda: None)
     monkeypatch.setattr(server, "_GOLOGIN", {"run_id": "fixture"})
+    monkeypatch.setattr(server.facebook_runs, "status", lambda run: {"worker": {"id": server._FACEBOOK_WORKER_ID}})
     monkeypatch.setattr(server.facebook_task, "forget", lambda run: events.append("forget"))
 
     def pause(run, action):
@@ -63,3 +64,12 @@ def test_save_failure_is_reported_without_leaking_backend_payload(monkeypatch, c
     output = capsys.readouterr().err
     assert "closure is unconfirmed" in output
     assert "PRIVATE_BACKEND_PAYLOAD" not in output
+
+
+def test_disconnecting_a_readonly_observer_does_not_pause_another_worker(monkeypatch):
+    monkeypatch.setattr(server, "_GOLOGIN", {"session": None})
+    monkeypatch.setattr(server, "_FACEBOOK_RUN_ID", "observed-run")
+    monkeypatch.setattr(server.facebook_runs, "status", lambda run: {"worker": {"id": "another-worker"}})
+    monkeypatch.setattr(server.facebook_runs, "transition", lambda *args: pytest.fail("observer must not pause the publisher"))
+    monkeypatch.setattr(server.facebook_task, "forget", lambda *args: pytest.fail("observer must not change credentials"))
+    server._pause_disconnected_run()
