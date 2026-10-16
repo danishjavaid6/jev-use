@@ -1788,6 +1788,25 @@ def handle(request: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
+def _pause_disconnected_run() -> None:
+    """Disconnect is not permission to continue publication in the background."""
+    run_id = _GOLOGIN.get("run_id") or _FACEBOOK_RUN_ID
+    if run_id:
+        try:
+            facebook_runs.transition(run_id, "pause")
+            facebook_task.forget(run_id)
+        except Exception:
+            log("shutdown: could not pause the saved run; inspect it before resuming")
+
+
+def _close_disconnected_profile() -> None:
+    try:
+        tool_browser_close({})
+    except Exception:
+        # Never print backend exception payloads: they may contain credentials.
+        log("shutdown: profile save/close failed; closure is unconfirmed, inspect before resuming")
+
+
 def main() -> int:
     load_env()
     if not os.environ.get("TYPESAFE_API_KEY"):
@@ -1797,6 +1816,7 @@ def main() -> int:
     busy = threading.Event()
     active_request = {}
     write_lock = threading.Lock()
+    worker = None
 
     def respond(request):
         response = None
@@ -1810,31 +1830,45 @@ def main() -> int:
             with write_lock:
                 busy.clear()
                 if response is not None:
-                    send(response)
+                    try:
+                        send(response)
+                    except (BrokenPipeError, OSError):
+                        log("MCP response channel closed; saved workflow will require inspection")
 
-    for line in sys.stdin:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            request = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if request.get("method") == "tools/call":
-            with write_lock:
-                if busy.is_set():
-                    send({"jsonrpc": "2.0", "id": request.get("id"), "result": {
-                        "isError": True, "content": [{"type": "text", "text": f"Request not started: {active_request.get('tool', 'another tool')} (request ID {active_request.get('id')}) is still running. Wait for that original call's result; do not issue parallel phone calls or repeat actions."}]}})
-                else:
-                    active_request.update(tool=request.get("params", {}).get("name", "unknown tool"), id=request.get("id"))
-                    busy.set()
-                    threading.Thread(target=respond, args=(request,), daemon=True).start()
-        else:
-            response = handle(request)
-            if response is not None:
+    try:
+        for line in sys.stdin:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                request = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if request.get("method") == "tools/call":
                 with write_lock:
-                    send(response)
-    betterwright.close_sessions()
+                    if busy.is_set():
+                        send({"jsonrpc": "2.0", "id": request.get("id"), "result": {
+                            "isError": True, "content": [{"type": "text", "text": f"Request not started: {active_request.get('tool', 'another tool')} (request ID {active_request.get('id')}) is still running. Wait for that original call's result; do not issue parallel phone calls or repeat actions."}]}})
+                    else:
+                        active_request.update(tool=request.get("params", {}).get("name", "unknown tool"), id=request.get("id"))
+                        busy.set()
+                        worker = threading.Thread(target=respond, args=(request,), daemon=True)
+                        worker.start()
+            else:
+                response = handle(request)
+                if response is not None:
+                    with write_lock:
+                        send(response)
+    finally:
+        # Do not tear down the bridge while an action is writing its journal. Pause
+        # first so read-recovery cannot start another action, then drain the current
+        # call and commit the real GoLogin session before releasing ownership.
+        _pause_disconnected_run()
+        if worker is not None:
+            worker.join()
+        # The disconnected call may have been opening the profile when EOF arrived.
+        _pause_disconnected_run()
+        _close_disconnected_profile()
     return 0
 
 

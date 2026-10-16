@@ -126,6 +126,47 @@ def ready(browser):
     assert browser.step()["performed"] == "inventory"
 
 
+@pytest.mark.parametrize("boundary", ["login", "wait_home", "browse", "open_form", "wait_form",
+                                      "fill", "create", "confirm", "home", "browse_after", "logout"])
+def test_disconnect_at_each_boundary_resumes_same_job_without_duplicate_pages(browser, monkeypatch, boundary):
+    """Crash the agent's memory at each phase, retaining only saved inputs/journals."""
+    def next_step():
+        reply = browser.step(password="PRIVATE_RUNTIME_SECRET")
+        if reply["status"] == "needs_input":
+            assert reply["required"] == ["page_name", "category"]
+            reply = browser.step(page_name="Stable Page " + reply["account"], category="Artist")
+        return reply
+
+    for _ in range(100):
+        reply = next_step()
+        assert reply["status"] == "continue", reply
+        if reply.get("performed") == boundary:
+            break
+    else:
+        pytest.fail("workflow boundary was not reached")
+
+    monkeypatch.setattr(mcp_server, "_GOLOGIN", {"run_id": "batch"})
+    monkeypatch.setattr(mcp_server, "tool_browser_close", lambda _: browser.close())
+    mcp_server._pause_disconnected_run()
+    mcp_server._close_disconnected_profile()
+    assert runs.status("batch")["status"] == "paused"
+    assert not task._PASSWORDS
+    assert browser.session is None
+    runs.transition("batch", "resume")
+
+    for _ in range(120):
+        reply = next_step()
+        if reply["status"] == "completed":
+            break
+        assert reply["status"] == "continue", reply
+    assert reply["status"] == "completed", reply
+    assert reply["progress"]["accounts_completed"] == 4
+    assert len([event for event in browser.events if event[1] == "create"]) == 4
+    assert len([event for event in browser.events if event[1] == "logout"]) == 4
+    assert browser.session is None
+    assert "PRIVATE_RUNTIME_SECRET" not in json.dumps(runs.status("batch"))
+
+
 def test_password_survives_calls_but_not_restart_pause_or_expiry(browser, monkeypatch):
     ready(browser)
     assert browser.step()["required"] == ["password"]

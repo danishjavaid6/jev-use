@@ -63,6 +63,22 @@ sanitized causes when recovery was needed. A pause interrupts further attempts.
 After all three reads fail, use the offered diagnosis once and stop; do not
 start another job or keep retrying indefinitely.
 
+`Connection closed` / `MCP server is not connected` is a host connection failure,
+not a Facebook popup. Do not call Page actions or run installation to repair it.
+Use the harness's reconnect control if available, then make up to three read-only
+`browser_facebook_run(action="status", run_id=RUN)` checks (1s/2s between failures).
+On reconnection read the saved scope, resume the same authorized run if paused,
+and return to `next`. If reconnection is unavailable or three checks fail, report
+the connection blocker; never launch a second worker or invent another run ID.
+Normal EOF pauses the job, drains the current action and saves/closes its profile.
+A hard kill may leave an uncertain action: inspect it, never replay Create.
+
+Package-manager hooks defer machine setup. Maintenance must use explicit
+`jev-use install` with MCP sessions disconnected; its live-session guard also
+applies to other checkouts. Do not change configuration, install skills or update
+the runtime while a publishing agent is running. `action_failure` contains a
+sanitized failure category; include it when reporting a failed action.
+
 Supply a common password through the runtime `password` argument once when
 requested (or on the first next call). It stays only in this MCP process, scoped
 to the run, and expires after 30 minutes idle; pause, completion or process restart
