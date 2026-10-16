@@ -8,7 +8,7 @@ import time
 
 import pytest
 
-from jev_use import browser, mcp_server
+from jev_use import browser, host, mcp_server
 from jev_use.driver import DriverError
 from jev_use.profiles import LocalProfile
 
@@ -365,7 +365,7 @@ def test_attach_explains_the_fix_when_no_port(monkeypatch: pytest.MonkeyPatch) -
     with pytest.raises(DriverError) as excinfo:
         browser.attach(FakeDriver())
     message = str(excinfo.value)
-    assert "enable-cdp.sh" in message, "the error must name the remediation"
+    assert host.launcher_hint() in message, "the error must name this platform's remediation"
     assert "/json/version" in message or "CDP" in message
 
 
@@ -399,7 +399,7 @@ def test_attach_refuses_rather_than_driving_the_wrong_profile(
     with pytest.raises(DriverError) as excinfo:
         browser.attach(FakeDriver())
     assert "without a CDP endpoint" in str(excinfo.value)
-    assert "enable-cdp.sh" in str(excinfo.value)
+    assert host.launcher_hint() in str(excinfo.value)
 
 
 def test_attach_honours_an_explicit_profile(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1089,6 +1089,10 @@ def test_surface_is_browser_and_android_only() -> None:
     """
     names = [t["name"] for t in mcp_server.TOOLS]
     assert names == [
+        "browser_facebook",
+        "browser_facebook_run",
+        "browser_facebook_next",
+        "browser_facebook_vision",
         "browser_profiles",
         "browser_open",
         "browser_close",

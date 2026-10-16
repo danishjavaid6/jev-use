@@ -126,7 +126,9 @@ def test_chrome_root_on_macos() -> None:
         monkeypatch.undo()
 
 
-def test_chrome_root_on_linux() -> None:
+def test_chrome_root_on_linux(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(host, "IS_WINDOWS", False)
+    monkeypatch.setattr(host, "IS_MACOS", False)
     assert host.chrome_user_data_root() == Path.home() / ".config" / "google-chrome"
 
 
@@ -176,6 +178,7 @@ def test_driver_not_found_returns_none(monkeypatch: pytest.MonkeyPatch, tmp_path
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
     monkeypatch.delenv("CUA_DRIVER_COMMAND", raising=False)
     monkeypatch.setattr(host.shutil, "which", lambda *a, **k: None)
+    monkeypatch.setattr(host, "cua_driver_candidates", lambda: [tmp_path / "missing-driver.exe"])
     assert host.find_cua_driver() is None
 
 
@@ -190,7 +193,8 @@ def test_windows_install_hint_is_powershell_not_bash(monkeypatch: pytest.MonkeyP
     assert "install.sh" in host.driver_install_hint()
 
 
-def test_detach_kwargs_are_posix_on_posix() -> None:
+def test_detach_kwargs_are_posix_on_posix(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(host, "IS_WINDOWS", False)
     assert host.detach_kwargs() == {"start_new_session": True}
 
 
@@ -198,6 +202,7 @@ def test_detach_kwargs_are_posix_on_posix() -> None:
 
 
 def test_launcher_hint_is_per_platform(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(host, "IS_WINDOWS", False)
     assert host.launcher_hint() == "scripts/enable-cdp.sh"
 
     monkeypatch.setattr(host, "IS_WINDOWS", True)

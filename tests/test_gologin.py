@@ -72,12 +72,56 @@ def test_profiles_accepts_the_bare_list_shape(monkeypatch: pytest.MonkeyPatch) -
         gologin, "_api_get", lambda path: [{"id": "1", "name": "Acme"}, {"id": "2"}]
     )
     found = gologin.profiles()
-    assert [(p.id, p.name) for p in found] == [("1", "Acme"), ("2", "2")]
+    assert {(p.id, p.name) for p in found} == {("1", "Acme"), ("2", "2")}
 
 
 def test_profiles_accepts_the_wrapped_shape(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(gologin, "_api_get", lambda path: {"profiles": [{"id": "9", "name": "X"}]})
     assert [p.id for p in gologin.profiles()] == ["9"]
+
+
+def test_profiles_fetches_remaining_pages_and_deduplicates(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = []
+    def api(path):
+        calls.append(path)
+        if path == "/browser/v2":
+            return {"profiles": [{"id": str(i)} for i in range(30)]}
+        return {"profiles": [{"id": "29"}, {"id": "30", "name": "Last profile"}]}
+    monkeypatch.setattr(gologin, "_api_get", api)
+    found = gologin.profiles()
+    assert len(found) == 31
+    assert found[0].name == "0"
+    assert any(profile.name == "Last profile" for profile in found)
+    assert calls == ["/browser/v2", "/browser/v2?page=2"]
+
+
+def test_profiles_are_sorted_by_numeric_profile_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        gologin,
+        "_api_get",
+        lambda path: {
+            "profiles": [
+                {"id": "22", "name": "Profile 22"},
+                {"id": "1", "name": "Profile 1"},
+                {"id": "10", "name": "Profile 10"},
+            ]
+        },
+    )
+    assert [profile.name for profile in gologin.profiles()] == [
+        "Profile 1", "Profile 10", "Profile 22"
+    ]
+
+
+def test_profiles_refuses_repeated_full_pages(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(gologin, "_api_get", lambda path: [{"id": str(i)} for i in range(30)])
+    with pytest.raises(gologin.GoLoginError, match="pagination repeated"):
+        gologin.profiles()
+
+
+def test_profiles_refuses_unexpected_response(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(gologin, "_api_get", lambda path: {"error": "Invalid request"})
+    with pytest.raises(gologin.GoLoginError, match="unexpected response shape"):
+        gologin.profiles()
 
 
 def test_find_matches_a_name_case_insensitively(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -243,6 +287,36 @@ def test_browser_open_auto_falls_back_to_gologin(
 def test_browser_close_with_nothing_open_is_not_an_error() -> None:
     mcp_server._GOLOGIN["session"] = None
     assert "nothing to close" in mcp_server.tool_browser_close({})
+
+
+def test_failed_close_retains_ownership_and_reports_mcp_error_without_backend_secrets(monkeypatch):
+    class FailedSession:
+        profile = gologin.GoLoginProfile("id-1", "Profile 23")
+
+        def stop(self):
+            raise RuntimeError("PRIVATE_BACKEND_TOKEN")
+
+    session = FailedSession()
+    monkeypatch.setitem(mcp_server._GOLOGIN, "session", session)
+    monkeypatch.setattr(mcp_server.betterwright, "close_sessions", lambda: None)
+    monkeypatch.setattr(mcp_server, "reset_browser_session", lambda: None)
+    response = mcp_server.handle({"id": 1, "method": "tools/call", "params": {"name": "browser_close", "arguments": {}}})
+    assert response["result"]["isError"]
+    assert mcp_server._GOLOGIN["session"] is session
+    message = response["result"]["content"][0]["text"]
+    assert "ownership retained" in message
+    assert "PRIVATE_BACKEND_TOKEN" not in message
+
+
+def test_opening_another_profile_cannot_drop_ownership_of_unfinished_session(monkeypatch):
+    from types import SimpleNamespace
+    session = SimpleNamespace(profile=gologin.GoLoginProfile("old", "Profile 23"), port=1234)
+    monkeypatch.setitem(mcp_server._GOLOGIN, "session", session)
+    monkeypatch.setattr(gologin, "find", lambda _: gologin.GoLoginProfile("next", "Profile 24"))
+    monkeypatch.setattr(gologin, "launch", lambda *args, **kwargs: pytest.fail("must close the owned profile first"))
+    with pytest.raises(gologin.GoLoginError, match="call browser_close"):
+        mcp_server._open_gologin("next", {})
+    assert mcp_server._GOLOGIN["session"] is session
 
 
 def test_browser_profiles_says_how_to_enable_gologin_without_a_token(

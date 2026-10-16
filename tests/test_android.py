@@ -1082,10 +1082,11 @@ def test_the_webview_link_encodes_the_page_url_in_full() -> None:
     assert "%3Fref%3Dbookmarks" in encoded
 
 
-def test_each_check_asks_for_a_different_url() -> None:
+def test_each_check_asks_for_a_different_url(monkeypatch: pytest.MonkeyPatch) -> None:
     """Measured need: the in-app webview keeps the last page, so a re-run after
     switching accounts can render the previous account's answer. A changing query
     parameter is what makes the result follow the session rather than the cache."""
+    monkeypatch.setattr(android.time, "time_ns", lambda: 123)
     first = android.cache_busted(android.FACEBOOK_PRIMARY_LOCATION_URL)
     second = android.cache_busted(android.FACEBOOK_PRIMARY_LOCATION_URL)
     assert first != second

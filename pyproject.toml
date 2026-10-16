@@ -6,7 +6,7 @@ requires-python = ">=3.10"
 dependencies = []
 
 [project.optional-dependencies]
-live = ["typesafe-sdk"]
+live = ["typesafe-sdk>=0.7.5", "Pillow>=10"]
 # The official GoLogin SDK: it launches a GoLogin profile in its original form
 # (Orbita, its fingerprint, proxy and cookies) and returns the CDP address, which
 # is what `browser_open(vendor="gologin")` drives. Optional because it is only

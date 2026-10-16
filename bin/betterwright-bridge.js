@@ -5,17 +5,27 @@ const path = require('node:path');
 const fs = require('node:fs');
 const { pathToFileURL } = require('node:url');
 const { createRequire } = require('node:module');
-const { watchNativeDialogs } = require('./native-dialogs');
+const { chooseWorkflowTab, adoptWorkflowTab } = require('./workflow-tabs');
 const { WindowsChooser } = require('./windows-chooser');
 const os = require('node:os');
 const crypto = require('node:crypto');
 const helpers = fs.readFileSync(path.join(__dirname, 'workflow-helpers.js'), 'utf8') + '\n' + fs.readFileSync(path.join(__dirname, '..', 'skills', 'facebook-create-pages', 'scripts', 'account-runner.js'), 'utf8');
+const agentHelpers = fs.readFileSync(path.join(__dirname, 'facebook-agent.js'), 'utf8');
 
 function resolveSDK(cli) {
   const roots = [__dirname, path.dirname(process.execPath)];
   if (cli) {
     roots.push(path.dirname(cli));
     try { roots.push(path.dirname(fs.realpathSync(cli))); } catch {}
+  }
+  const pnpmHomes = [process.env.PNPM_HOME, process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, 'pnpm'), cli && path.dirname(cli)].filter(Boolean);
+  for (const home of pnpmHomes) {
+    const globalRoot = path.join(home, 'global');
+    try {
+      for (const entry of fs.readdirSync(globalRoot, { withFileTypes: true })) {
+        if (entry.isDirectory()) roots.push(path.join(globalRoot, entry.name));
+      }
+    } catch { /* This installation may use a different global layout. */ }
   }
   for (const key of ['APPDATA', 'LOCALAPPDATA', 'USERPROFILE', 'BUN_INSTALL']) {
     if (process.env[key]) roots.push(path.join(process.env[key], 'npm'), path.join(process.env[key], '.bun', 'install', 'global'), path.join(process.env[key], 'AppData', 'Roaming', 'npm'));
@@ -26,7 +36,15 @@ function resolveSDK(cli) {
     const direct = path.resolve(root, '..', 'src', 'index.js');
     if (fs.existsSync(direct) && fs.existsSync(path.resolve(root, '..', '..', 'package.json'))) return direct;
   }
-  throw new Error('BetterWright SDK not found. Install: npm install -g betterwright');
+  throw new Error('BetterWright SDK not found. Install: pnpm add -g betterwright');
+}
+
+function attachmentOptions(ws) {
+  // SDK bookkeeping must not share the user's default Betterwright lock.
+  // GoLogin still owns the actual browser profile, cookies and saved sessions.
+  return { provider: { cdpUrl: ws }, profile: 'jev-' + crypto.randomUUID(),
+    adBlock: false, parkBackgroundPages: false, vault: false,
+    credentialCapture: false, downloadPolicy: 'deny', defaultTimeout: 5 };
 }
 
 async function serve() {
@@ -38,11 +56,11 @@ async function serve() {
   let selectedPage;
   const sessions = [];
   let nativeDialogs;
-  let nativeWarning;
   let windowsChooser;
   let checkpointFile;
   let checkpoints = {};
   let checkpointScope;
+  let selectedTarget;
   const lines = readline.createInterface({ input: process.stdin });
   for await (const line of lines) {
     let request;
@@ -59,39 +77,22 @@ async function serve() {
       }
       windowsChooser ||= new WindowsChooser(Number(new URL(request.ws).port));
       windowsChooser.toggle(request.dismiss_overlays !== false);
+      if (request.dismiss_overlays !== false) await windowsChooser.waitUntilReady();
       if (!browser) {
-        if (request.target_id) {
-          try { nativeDialogs = await watchNativeDialogs(request.ws, request.target_id, request.dismiss_overlays !== false); }
-          catch (error) { nativeWarning = error.message; }
-        }
         const { BetterWright } = await import(pathToFileURL(resolveSDK(request.cli)).href);
-        browser = new BetterWright({ provider: { cdpUrl: request.ws }, adBlock: false, parkBackgroundPages: false, vault: false, credentialCapture: false, downloadPolicy: 'deny', defaultTimeout: 5 });
+        browser = new BetterWright(attachmentOptions(request.ws));
       }
-      if (!selectedSession || request.page_url) {
-        // BetterWright initially adopts only one existing tab per session.
-        // Allocate read-only lanes for existing tabs; never navigate the wrong tab.
-        const count = request.tab_count || 1;
-        let selected;
-        for (let index = 0; index < count; index++) {
-          const session = sessions[index] || `jev-tab-${index}`;
-          if (!sessions[index]) sessions.push(session);
-          const probe = await browser.run('return page.url()', { session, timeout: request.timeout });
-          if (!probe.ok) throw new Error(JSON.stringify(probe));
-          for (const candidate of probe.pages || []) {
-            if (candidate.url === request.page_url) selected = { session, page: candidate.pageId };
-          }
-          if (selected) break;
-        }
-        if (!selected) throw new Error('Workflow tab could not be adopted; inspect existing tabs before retrying');
+      if (!selectedSession || request.targets) {
+        nativeDialogs?.socket.close();
+        const selected = await adoptWorkflowTab(browser, request, sessions);
         selectedSession = selected.session;
         selectedPage = selected.page;
+        selectedTarget = selected.targetId;
+        nativeDialogs = selected.watcher;
       }
       const prelude = `await usePage(${JSON.stringify(selectedPage)});\n`;
-      if (request.target_id && nativeDialogs && nativeDialogs.targetId !== request.target_id) {
-        nativeDialogs.socket.close();
-        nativeDialogs = await watchNativeDialogs(request.ws, request.target_id, request.dismiss_overlays !== false);
-      }
       if (nativeDialogs) await nativeDialogs.toggle(request.dismiss_overlays !== false);
+      if (request.dismiss_overlays !== false) await windowsChooser.ensureClear();
       // Reads never consume reservations. Only an explicit submission request
       // runs an actionability check, then journals the attempt before the click.
       const permits = [];
@@ -105,6 +106,7 @@ async function serve() {
         if (!submission.run_id || !submission.account) throw new Error('submission requires run_id and account');
         const probeCode = prelude + `state.jevWorkflow = ${JSON.stringify(checkpoints)};\n` + helpers + `
 workflow.begin(${JSON.stringify(submission.run_id)}, ${JSON.stringify(submission.account)});
+${submission.verify_account ? 'await facebookPages.assertAccount(workflow.status());' : ''}
 await workflow.validateCreation(${JSON.stringify({selector: submission.selector, timeout: 5000})});
 return JSON.parse(JSON.stringify(state.jevWorkflow));
 `;
@@ -118,14 +120,16 @@ return JSON.parse(JSON.stringify(state.jevWorkflow));
       persist();
       const restore = `state.jevWorkflow = ${JSON.stringify(checkpoints)}; state.jevSubmissionPermits = ${JSON.stringify(permits)};\n`;
       const submitCode = request.submission ? `workflow.begin(${JSON.stringify(request.submission.run_id)}, ${JSON.stringify(request.submission.account)}); await workflow.submitCreation(${JSON.stringify({selector: request.submission.selector})});\n` : '';
-      const wrapped = prelude + restore + helpers + `
+      const wrapped = prelude + restore + helpers + '\n' + agentHelpers + `
 let value;
 let failure;
 try { value = await (async () => { ${submitCode}${request.code}\n })(); }
 catch (error) { failure = error.message; }
+if (state.jevWorkflow?.[state.jevWorkflowActive]) state.jevWorkflow[state.jevWorkflowActive].updatedAt = Date.now();
 return { value, failure, checkpoints: JSON.parse(JSON.stringify(state.jevWorkflow || {})) };
 `;
       const result = await browser.run(wrapped, { session: selectedSession, timeout: request.timeout });
+      result.workflowAttachment = { targetId: selectedTarget };
       if (result.ok) {
         const execution = result.result;
         checkpoints = execution.checkpoints;
@@ -137,7 +141,15 @@ return { value, failure, checkpoints: JSON.parse(JSON.stringify(state.jevWorkflo
       }
       if (nativeDialogs?.dismissed.length) result.nativeDialogsDismissed = nativeDialogs.dismissed.splice(0);
       if (windowsChooser.dismissed.length) result.nativeDialogsDismissed = [...(result.nativeDialogsDismissed || []), ...windowsChooser.dismissed.splice(0)];
-      const warning = nativeWarning || nativeDialogs?.warning || windowsChooser.warning;
+      if (request.dismiss_overlays !== false) {
+        try { result.browserDialogs = await windowsChooser.ensureClear(); }
+        catch (error) {
+          result.browserDialogs = windowsChooser.inspection || { inspected: false, blocked: true };
+          result.ok = false;
+          result.error = error.message;
+        }
+      }
+      const warning = nativeDialogs?.warning || windowsChooser.warning;
       if (warning) result.warnings = [...(result.warnings || []), warning];
       process.stdout.write(JSON.stringify({ id: request.id, result }) + '\n');
     } catch (error) {
@@ -150,4 +162,4 @@ return { value, failure, checkpoints: JSON.parse(JSON.stringify(state.jevWorkflo
   process.exit(0);
 }
 if (require.main === module) serve().catch(error => { console.error(error.message); process.exit(1); });
-module.exports = { resolveSDK };
+module.exports = { resolveSDK, attachmentOptions, chooseWorkflowTab };

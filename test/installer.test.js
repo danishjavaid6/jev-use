@@ -3,13 +3,11 @@
 /**
  * The installer's failure contract.
  *
- * This is the difference between a confusing `npm install` failure and a
- * message that says how to finish: in postinstall mode (`auto`) a provision
- * failure must be *reported* and not thrown, and in manual mode it must be a
- * real error with a nonzero exit.
+ * Postinstall is read-only. Explicit setup reports provisioning failures with a
+ * nonzero exit and still records enough state for doctor to explain the problem.
  *
  * A failed runtime must not cost the user the rest of the install, either. The
- * harness entry is a node shim that provisions python itself on first use, so
+ * harness entry is a node shim that reports missing Python on first use, so
  * the server and the skills are written whether or not python came up —
  * otherwise a broken runtime leaves no tools at all and nothing that says why.
  */
@@ -32,8 +30,10 @@ let originalStateDir;
 let originalHome;
 let originalEnsure;
 let originalDriverEnsure;
+let originalExtra;
 let originalPackageRoot;
 let originalXdg;
+let originalAppData;
 
 beforeEach(() => {
   dir = fs.mkdtempSync(path.join(os.tmpdir(), 'jev-installer-'));
@@ -41,6 +41,7 @@ beforeEach(() => {
   originalHome = paths.HOME;
   originalEnsure = runtime.ensure;
   originalDriverEnsure = driver.ensure;
+  originalExtra = runtime.installExtra;
   originalPackageRoot = paths.packageRoot;
   originalXdg = process.env.XDG_CONFIG_HOME;
 
@@ -51,10 +52,12 @@ beforeEach(() => {
   paths.stateDir = () => dir;
   paths.HOME = dir;
   delete process.env.XDG_CONFIG_HOME;
+  // Windows resolves VS Code and OpenCode through %APPDATA%, not HOME.
+  originalAppData = process.env.APPDATA;
+  process.env.APPDATA = path.join(dir, 'AppData', 'Roaming');
 
-  runtime.ensure = async () => {
-    throw new Error('no usable python');
-  };
+  runtime.ensure = async () => 'fixture-python';
+  runtime.installExtra = () => null;
   // Never fetch the real cua-driver from a test.
   driver.ensure = async () => null;
 });
@@ -64,25 +67,30 @@ afterEach(() => {
   paths.HOME = originalHome;
   runtime.ensure = originalEnsure;
   driver.ensure = originalDriverEnsure;
+  runtime.installExtra = originalExtra;
   paths.packageRoot = originalPackageRoot;
   if (originalXdg === undefined) delete process.env.XDG_CONFIG_HOME;
   else process.env.XDG_CONFIG_HOME = originalXdg;
+  if (originalAppData === undefined) delete process.env.APPDATA;
+  else process.env.APPDATA = originalAppData;
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-test('postinstall mode reports an unprovisionable runtime instead of throwing', async () => {
+test('postinstall never provisions or changes global state, even with explicit keys', async () => {
+  runtime.ensure = async () => { throw new Error('must not run'); };
   const summary = await installer.install({ auto: true, key: 'sk-test' });
-  assert.match(summary.error, /no usable python/);
+  assert.equal(summary.deferred, true);
   assert.equal(summary.python, null);
+  assert.deepEqual(fs.readdirSync(dir), []);
 });
 
 test('a failed runtime still registers the server, so the harness can reach it', async () => {
   // Detection asks only that the harness's config directory exists.
   fs.mkdirSync(path.join(dir, '.commandcode'), { recursive: true });
 
-  const summary = await installer.install({ auto: true, key: 'sk-test' });
+  runtime.ensure = async () => { throw new Error('no usable python'); };
+  await assert.rejects(installer.install({ key: 'sk-test' }), /no usable python/);
 
-  assert.equal(summary.harnesses.length, 1, 'registering does not depend on python');
   const config = JSON.parse(fs.readFileSync(path.join(dir, '.commandcode', 'mcp.json'), 'utf8'));
   assert.ok(
     config.mcpServers['jev-use'],
@@ -98,7 +106,7 @@ test('a copy inside npm\'s cache is never registered, because npm deletes it', a
   // under os.tmpdir(), which is the guard's other branch and would mask this one.
   paths.packageRoot = () => path.join(os.homedir(), '.npm', '_cacache', 'tmp', 'git-cloneABC123');
 
-  const summary = await installer.install({ auto: true, key: 'sk-test' });
+  const summary = await installer.install({ key: 'sk-test' });
 
   assert.equal(summary.harnesses.length, 0, 'a doomed path is not worth recording');
   assert.equal(
@@ -115,14 +123,16 @@ test('the temporary-root rule catches both npm scratch locations', () => {
   assert.equal(installer.isEphemeralRoot(path.join(os.homedir(), 'Hamza', 'computer-use')), false, 'a checkout');
 });
 
-test('postinstall mode still records what happened, for doctor to read', async () => {
-  await installer.install({ auto: true, key: 'sk-test' });
+test('explicit installation records what happened, for doctor to read', async () => {
+  runtime.ensure = async () => { throw new Error('no usable python'); };
+  await assert.rejects(installer.install({ key: 'sk-test' }), /no usable python/);
   const marker = JSON.parse(fs.readFileSync(path.join(dir, 'installed.json'), 'utf8'));
   assert.match(marker.error, /no usable python/);
   assert.equal(marker.key, true, 'the key was saved before the runtime failed');
 });
 
 test('manual mode raises, because the user is watching', async () => {
+  runtime.ensure = async () => { throw new Error('no usable python'); };
   await assert.rejects(
     () => installer.install({ auto: false, key: 'sk-test' }),
     /no usable python/
@@ -130,7 +140,8 @@ test('manual mode raises, because the user is watching', async () => {
 });
 
 test('the key is saved before anything that can fail', async () => {
-  await installer.install({ auto: true, key: 'sk-keep-me' }).catch(() => {});
+  runtime.ensure = async () => { throw new Error('no usable python'); };
+  await installer.install({ key: 'sk-keep-me' }).catch(() => {});
   const env = fs.readFileSync(path.join(dir, '.env'), 'utf8');
   assert.match(env, /TYPESAFE_API_KEY=sk-keep-me/);
 });
@@ -173,6 +184,24 @@ test('doctor reports a live registration as ok', async () => {
   assert.ok(!/which is gone/.test(report), 'a path that exists is not reported as gone');
 });
 
+test('doctor identifies an existing registration to a different checkout', async () => {
+  fs.mkdirSync(path.join(dir, '.commandcode'), { recursive: true });
+  const other = path.join(dir, 'another-checkout', 'bin', 'jev-use-mcp.js');
+  fs.mkdirSync(path.dirname(other), { recursive: true });
+  fs.writeFileSync(other, '// older checkout');
+  commandcode.register({ command: process.execPath, args: [other] });
+  const report = await installer.doctor();
+  assert.match(report, /registered to another checkout/);
+});
+
+test('doctor checks launcher paths without treating a literal version argument as a file', async () => {
+  fs.mkdirSync(path.join(dir, '.commandcode'), { recursive: true });
+  commandcode.register({ command: process.execPath, args: [paths.mcpEntry(), 'facebook-actions-v2'] });
+  const report = await installer.doctor();
+  assert.match(report, /Command Code — registered(\n|$)/);
+  assert.ok(!report.includes('facebook-actions-v2, which is gone'));
+});
+
 test('doctor reports the slash commands, not only the server', async () => {
   fs.mkdirSync(path.join(dir, '.commandcode'), { recursive: true });
 
@@ -209,7 +238,7 @@ test('skills install into the shared global agent directory on a fresh machine',
 
 test('--harness registers a named harness even when detection did not fire', async () => {
   const summary = await installer.install({
-    auto: true,
+    auto: false,
     key: 'sk-test',
     harness: ['windsurf'],
   });
@@ -225,7 +254,7 @@ test('--harness registers a named harness even when detection did not fire', asy
 test('--harness registers only what it names', async () => {
   fs.mkdirSync(path.join(dir, '.commandcode'), { recursive: true });
 
-  const summary = await installer.install({ auto: true, key: 'sk-test', harness: ['cursor'] });
+  const summary = await installer.install({ key: 'sk-test', harness: ['cursor'] });
 
   assert.deepEqual(summary.harnesses.map((h) => h.id), ['cursor']);
   assert.equal(
@@ -254,7 +283,7 @@ test('a GoLogin token is saved and pulls in the GoLogin SDK', async () => {
 
   try {
     const summary = await installer.install({
-      auto: true,
+      auto: false,
       key: 'sk-test',
       gologinToken: 'gl-abc',
     });
@@ -262,7 +291,7 @@ test('a GoLogin token is saved and pulls in the GoLogin SDK', async () => {
     assert.equal(summary.gologin, true);
     assert.deepEqual(
       calls,
-      ['gologin'],
+      ['gologin', 'harness'],
       'the token asks for the SDK and the CDP client it is driven over'
     );
     const env = fs.readFileSync(path.join(dir, '.env'), 'utf8');
@@ -286,9 +315,9 @@ test('the GoLogin SDK is not installed without a token', async () => {
   };
 
   try {
-    const summary = await installer.install({ auto: true, key: 'sk-test' });
+    const summary = await installer.install({ key: 'sk-test' });
     assert.equal(summary.gologin, false);
-    assert.deepEqual(calls, [], 'nobody who does not use GoLogin pays for its dependency');
+    assert.deepEqual(calls, ['harness'], 'GoLogin is not installed without its token');
   } finally {
     runtime.installExtra = originalExtra;
     if (originalEnv === undefined) delete process.env.GOLOGIN_TOKEN;

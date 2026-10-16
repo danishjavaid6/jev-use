@@ -98,6 +98,12 @@ class GoLoginProfile:
         return f"{self.name!r} ({self.id})"
 
 
+def profile_sort_key(profile: GoLoginProfile) -> tuple[int, str, str]:
+    """Put numbered GoLogin profiles in stable Profile 1, Profile 2 order."""
+    match = re.search(r"(?:^|\s)profile\s*(\d+)(?:\s|$)", profile.name, re.IGNORECASE)
+    return (int(match.group(1)) if match else 10**9, profile.name.casefold(), profile.id)
+
+
 def _api_get(path: str) -> Any:
     request = urllib.request.Request(
         f"{API_URL}{path}",
@@ -127,15 +133,29 @@ def profiles() -> list[GoLoginProfile]:
     `/browser/v2` has answered with both a bare list and a `{"profiles": […]}` wrapper
     across versions, so both are accepted rather than betting on one.
     """
-    payload = _api_get("/browser/v2")
-    if isinstance(payload, dict):
-        payload = payload.get("profiles", [])
     found: list[GoLoginProfile] = []
-    for entry in payload if isinstance(payload, list) else []:
-        if not isinstance(entry, dict) or not entry.get("id"):
-            continue
-        found.append(GoLoginProfile(id=str(entry["id"]), name=str(entry.get("name") or entry["id"])))
-    return found
+    seen: set[str] = set()
+    for page_number in range(1, 1001):
+        path = "/browser/v2" if page_number == 1 else f"/browser/v2?page={page_number}"
+        payload = _api_get(path)
+        entries = payload.get("profiles") if isinstance(payload, dict) else payload
+        if not isinstance(entries, list):
+            raise GoLoginError(f"GoLogin profile page {page_number} returned an unexpected response shape")
+        added = 0
+        for entry in entries:
+            if not isinstance(entry, dict) or not entry.get("id"):
+                continue
+            profile_id = str(entry["id"])
+            if profile_id in seen:
+                continue
+            seen.add(profile_id)
+            added += 1
+            found.append(GoLoginProfile(id=profile_id, name=str(entry.get("name") or profile_id)))
+        if len(entries) < 30:
+            return sorted(found, key=profile_sort_key)
+        if not added:
+            raise GoLoginError(f"GoLogin profile pagination repeated page {page_number}; cannot claim the list is complete")
+    raise GoLoginError("GoLogin profile pagination exceeded 1000 pages; cannot claim the list is complete")
 
 
 def find(wanted: str) -> GoLoginProfile:

@@ -1,121 +1,139 @@
 ---
 name: facebook-create-pages
-description: Create Facebook Pages across saved accounts in an existing GoLogin profile using a reusable runner, verified creation checkpoints, and logout between accounts.
+description: Create Facebook Pages across user-selected GoLogin profiles using a bounded next-step tool, durable checkpoints, popup handling, and verified logout.
 ---
 
-Use this skill for the user's authorized Page-creation task. Keep GoLogin as the
-browser owner. Use the jev-use MCP tools and their returned port; never start a
-second browser, clear cookies, change proxy/fingerprint settings, or use a shell
-CDP driver while MCP is attached.
+Use one persistent jev-use MCP connection. The user's instruction selects the
+profiles and authorizes work. Reading this skill or maintaining the project does
+not start publication. Do not launch a script/holder process or another worker.
 
-The executable [scripts/account-runner.js](scripts/account-runner.js) is bundled
-and injected into `browser_script` as `facebookPages`. Invoke it directly; do not
-rewrite the login, category, creation, wizard, or logout logic for each account.
-No live mutation is authorized merely by loading this skill.
+## Start or resume
 
-## Setup once
+1. Run `jev-use doctor` before a new session. Reload the MCP connection after
+   upgrading; a fresh doctor probe does not update a cached connection. Required
+   tools: `browser_facebook_run`, `browser_facebook_next`.
+2. Read `browser_facebook_run(action="status")` to recover prior scope and progress.
+   Distinguish a continuation from a new request for additional Pages. "Resume"
+   uses the saved `run_id`; "create again" or "create more" starts a new job,
+   even when the selected profiles/accounts are the same. A fresh job requests
+   one additional Page in each observed account. Never start publication for a
+   maintenance-only instruction.
+3. For a new job, call `browser_facebook_run(action="start", run_id=STABLE_ID, ...)`
+   with exactly ONE user-selected mode: `profile_numbers=[7]` for one profile,
+   `profile_numbers=[2,7,19]` for a list, `profile_start=23, profile_end=29` for a
+   range, or observed `profile_ids` for custom names. Discover named IDs with
+   `browser_profiles`. No profile selection is assumed. A new selection uses its
+   own run; retain old journals and creation evidence.
+4. Call `browser_facebook_next(run_id=RUN)`. Repeat only as directed below. It
+   owns opening/closing GoLogin, observed account selection, live status, popup
+   checks and ONE bounded workflow action per call. Do not choose ports, account
+   keys, action sequences, or tabs yourself in this mode.
 
-1. Load `browser_profiles`, `browser_open`, `browser_script`, `browser_close`.
-2. Find the exact requested GoLogin profile; open with `vendor="gologin"` and
-   `headless=false` if needed. Reuse its port throughout the task.
-3. Inspect the saved-account chooser once. Use the observed accounts and the
-   requested count. Create one stable run ID and an account/Page-name mapping.
-   If names are left to you, choose them once and keep them on retries.
-4. Reuse the task-supplied password only for login; do not save credentials in
-   the runner, run IDs, journals, screenshots, or files.
+Records belong to `(profile, run_id, account)`. Skip only accounts completed in
+the current job. Prior Pages never satisfy a new request: the same account can
+create another Page in another authorized job. Keep one stable run ID through
+all retries of a job; never invent new IDs to retry its uncertain Create click.
+Older unfinished requests remain recorded separately and are not replayed,
+marked complete, or deleted when another Page is requested. The response's
+`history` counts them separately from current-job progress. Page details stay
+stable within a job; choose the user's new Page details for the next request.
 
-## Two calls per account
+The controller creates one dedicated Facebook tab and retains its exact target
+ID. Other restored Facebook tabs are left untouched. Do not override that tab
+or attach by URL. A lost tab with a reserved/pending creation requires inspection,
+not a replacement tab or another Create click. One live MCP worker owns the run
+until its profile is closed/saved; another worker receives a blocker.
 
-Use the same config and checkpoint scope in both calls. `account` is a stable
-account identifier or the observed saved-account name; `account_name` is needed
-only when those differ. The runner checks the active identity on resumption.
+## The small-agent loop
 
-First call: `browser_script(port=N, timeout=240, code=...)`:
+| Returned status | Agent action |
+| --- | --- |
+| `continue` | Call the exact `next_call` immediately. Do not add sleeps. `requires_fresh_inspection` means the next call inspects before acting. |
+| `needs_input` | Supply only the `required` fields for the returned account, retaining `run_id`. Use already supplied user inputs; ask only for missing information. |
+| `needs_resume` | Read run status. For an authorized continuation, call `resume`, then call next again. Never replay the interrupted action directly. |
+| `paused` | Stop. Resume only when the user's current instruction authorizes continuation. |
+| `blocked` | Inspect the reason. If offered, call `browser_facebook_vision` once for read-only diagnosis, then report unresolved work. Do not loop or escape guards with scripts/new run IDs. |
+| `completed` | Report completion; the tool verified creation evidence, logout, inventories and profile closure. |
 
-```js
-return await facebookPages.prepare({
-  run_id: RUN_ID,
-  account: ACCOUNT,
-  page_name: PAGE_NAME,
-  bio: BIO,
-  password: TASK_PASSWORD
-});
-```
+Live-status reads get up to three attempts inside one `next` call, with short
+1s/2s delays and SDK reconnection to the same verified tab. No login, fill,
+Create or logout action is replayed by this recovery. A temporary unknown UI is
+reobserved too. `live_status_checks` reports attempt count, reconnections and
+sanitized causes when recovery was needed. A pause interrupts further attempts.
+After all three reads fail, use the offered diagnosis once and stop; do not
+start another job or keep retrying indefinitely.
 
-Replace uppercase variables with task values in the invocation, without storing
-the password in an external file. Keep default `dismiss_overlays=true`; the
-Sign in as credential chooser is distinct from the Facebook password form.
+`Connection closed` / `MCP server is not connected` is a host connection failure,
+not a Facebook popup. Do not call Page actions or run installation to repair it.
+Use the harness's reconnect control if available, then make up to three read-only
+`browser_facebook_run(action="status", run_id=RUN)` checks (1s/2s between failures).
+On reconnection read the saved scope, resume the same authorized run if paused,
+and return to `next`. If reconnection is unavailable or three checks fail, report
+the connection blocker; never launch a second worker or invent another run ID.
+Normal EOF pauses the job, drains the current action and saves/closes its profile.
+A hard kill may leave an uncertain action: inspect it, never replay Create.
 
-Preparation verifies an already-signed-in account using its identity and matching
-self-profile link, or selects the saved card once and waits up to 60 seconds for
-password/remembered login to finish. It scrolls/plays the feed for 30 seconds
-(tries an observed Reels/Videos link once if the home feed has no playback),
-fills the Page form, verifies it is
-ready, and saves `submission_reserved` without creating the Page. If the user
-changes the browsing requirement, adapt that step deliberately rather than
-claiming it occurred. No observed playback means pause for one focused inspection.
+Package-manager hooks defer machine setup. Maintenance must use explicit
+`jev-use install` with MCP sessions disconnected; its live-session guard also
+applies to other checkouts. Do not change configuration, install skills or update
+the runtime while a publishing agent is running. `action_failure` contains a
+sanitized failure category; include it when reporting a failed action.
 
-If `submission_reserved`, second call:
+Supply a common password through the runtime `password` argument once when
+requested (or on the first next call). It stays only in this MCP process, scoped
+to the run, and expires after 30 minutes idle; pause, completion or process restart
+removes it. After restart, resupply the user's known password when requested.
+Never put credentials in files, logs, Page details, or run-state tools. For
+rejection, use `corrected_password` only for an explicit user correction. Do not
+guess, keep trying the same rejected password, or bypass MFA/CAPTCHA.
 
-```text
-browser_script:
-  port: N
-  timeout: 180
-  submission: {run_id: RUN_ID, account: ACCOUNT}
-  code: return await facebookPages.finish({run_id: RUN_ID, account: ACCOUNT, page_name: PAGE_NAME});
-```
+When asked for `page_name` and `category`, use the user's stable mapping for the
+returned profile/account. Optional `bio` applies to that account. The backend
+persists these non-secret details before filling; never invent a different name
+after a failed fill or uncertain submission.
 
-The submission argument checks actionability first, journals the attempt, and
-clicks Create Page's button role once (works for `div[role="button"]`). The runner
-then waits for the exact delayed success notice, accepts the optional wizard's
-beforeunload, logs out through the account menu, and verifies the chooser returns.
-Continue to the next account only after `logged_out`.
+On stop, call `browser_facebook_run(action="pause", run_id=RUN)` and cease calls.
+Call `browser_close` to save/close the profile owned by this connection when
+safe; report any closure failure explicitly. A blocked job also needs this
+cleanup. Never leave a browser open without reporting it.
+A submitted action may already have committed: preserve state for inspection on
+resume. Only one worker may own a run. If the agent/connection dies, resume from
+saved state rather than starting over. An uncertain submission in this job
+must be inspected/confirmed, never clicked again. A separately authorized new
+job creates an additional Page without changing an older job's reservation.
+An unfinished account in the current run still requires reconciliation before
+switching to another account.
 
-## Resume and unexpected UI
+## What the tool executes
 
-- `logged_out`: account complete; do not create again.
-- `created`: run `facebookPages.finish` WITHOUT `submission` to finish logout.
-- `submitting`: run `facebookPages.finish` WITHOUT `submission` to confirm and
-  log out. If the notice is gone, inspect the actual Page identity once and use
-  an observed confirmation selector/URL/ID. An unchanged URL, disabled button,
-  search match, or "already manage a Page" error does not authorize another click.
-- `submission_reserved`: inspection does not consume it. A missing selector
-  fails before clicking, so correct it once and retry the submission argument.
-- Other stages: correct the observed problem and retry preparation with the SAME
-  run ID/account. Never erase checkpoints or generate new IDs to bypass a lock.
+Login -> settle alerts 20 seconds -> Home 60 seconds -> Reels 60 seconds ->
+Home 60 seconds -> open Page creation -> settle alerts 20 seconds -> fill ->
+create once -> confirm creation -> Home 30 seconds -> logout and verify chooser.
+Scroll distances, directions and pauses vary. Reels requires observed navigation
+and visible video. Target 5-6 minutes per account; never shorten required waits to
+meet that target. Network/account challenges can extend it.
 
-Never manually seed `accountId` to skip login. If the self-profile link cannot
-verify the requested account, inspect once; an `account_id` supplied by the user
-or verified in that inspection may be passed in config. The cookie must match it.
-A login already selected/submitted resumes waiting without repeating the action.
+Supported browser/native popups are checked around actions and during long steps.
+Unknown or uninspectable popups stop interaction. Vision uses Jev 1.14 and the
+image header for experimental, read-only screen/popup diagnosis. Its viewport
+capture cannot see browser chrome; its coordinates never authorize clicks.
+Identity, submission and success still require live structured evidence.
 
-Selector overrides in the runner are only for demonstrated UI changes:
-`account_selector`, `name_selector`, `category_selector`,
-`option_selector`, `bio_selector`, `create_selector`; finish accepts `confirmation`
-and `logout` options from the workflow helpers. Pass `create_selector` in the
-submission argument as `selector` too. Do not guess selectors or URLs.
-For externally opened profiles, keep a stable non-secret `checkpoint_scope` on
-all calls; profiles opened by this MCP server use the GoLogin ID automatically.
-If an older checkpoint lacks `accountId`, inspect identity before migrating it;
-never infer that it is the currently signed-in account.
+A blocked account means the job is unfinished. Report the profile/account,
+reason, verified successes, pending work and actual timings. Never call a filled
+form or created Page with pending logout complete. Repeated failures stop after
+two attempts; repairing a blocker may require a focused structured action.
+While the controller owns a profile, raw browser actions and lower-level
+mutations are refused. For explicitly requested manual recovery, pause and
+close/save first, then resume the authorized run and reopen with `browser_open`
+for the documented structured recovery action. Never do this as an automatic
+fallback after a blocker.
 
-Stop after one focused inspection/correction if the issue remains unresolved.
-Hand off MFA/CAPTCHA/account restrictions or unsupported native dialogs. Never
-bypass creation guards with a manual click, probe hidden APIs, clear cookies, or
-perform a logout URL experiment. Batch known steps rather than narrate each click.
+An unmatched password form can return `reset_login_view`. The backend returns
+to the chooser once only when no password was submitted. Submitted login and
+creation attempts keep their original guards. Vision failures report `phase`
+(`tab_selection`, `capture`, or `analysis`) so report the actual failing stage.
 
-If login stalls, report the runner's `loginObservation` and any tool warnings.
-Saved-account cards are not proof of live sessions; an absent identity cookie
-and unchanged page do not prove expired sessions or restrictions. A native-dialog
-connection warning means DOM inspection cannot rule out a browser-owned popup.
-Inspect the visible browser once (including browser chrome), or hand off that
-inspection when unavailable. Do not click behind a suspected native popup, test
-other accounts to generalize the failure, or describe untested accounts as blocked
-by a proven account-specific cause. Preserve the same run and checkpoints.
-
-## Finish
-
-Call `browser_close` to save the GoLogin profile. Report each account's Page name,
-confirmed stage, captured Page URL/ID when available, and unfinished work. Include
-elapsed time and the returned `timings` (login, browsing, navigation, fill,
-confirmation, logout); do not call pending creation or pending logout complete.
+For maintenance or a focused manual recovery, read
+[structured actions](references/structured-actions.md). For an explicitly
+requested older scripted workflow, read [legacy mode](references/legacy-runner.md).

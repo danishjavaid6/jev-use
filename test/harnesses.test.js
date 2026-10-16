@@ -27,19 +27,46 @@ const vscode = require('../lib/harnesses/vscode');
 const registry = require('../lib/harnesses');
 
 const ENTRY = { command: '/usr/bin/node', args: ['/opt/jev-use/bin/jev-use-mcp.js'] };
+// Command Code launches through a shell on Windows, so its adapter quotes paths there.
+const COMMANDCODE_ENTRY = paths.IS_WINDOWS
+  ? { command: commandcode.quoteWindows(ENTRY.command), args: ENTRY.args.map(commandcode.quoteWindows) }
+  : ENTRY;
+
+test('repeating identical registration does not touch watched configuration files', () => {
+  for (const harness of registry.ALL) {
+    const file = harness.register(ENTRY);
+    const text = fs.readFileSync(file, 'utf8');
+    const old = new Date('2020-01-01T00:00:00Z');
+    fs.utimesSync(file, old, old);
+    harness.register(ENTRY);
+    assert.equal(fs.readFileSync(file, 'utf8'), text, harness.id);
+    assert.equal(fs.statSync(file).mtimeMs, old.getTime(), harness.id + ' must not trigger a config reload');
+  }
+});
 
 let home;
 let originalHome;
+let originalAppData;
+let originalXdg;
 
 beforeEach(() => {
   home = fs.mkdtempSync(path.join(os.tmpdir(), 'jev-home-'));
   originalHome = paths.HOME;
   paths.HOME = home;
+  originalXdg = process.env.XDG_CONFIG_HOME;
   delete process.env.XDG_CONFIG_HOME;
+  // Windows resolves VS Code through %APPDATA%; point it at the
+  // POSIX-style ~/.config the tests write so neither touches the real profile.
+  originalAppData = process.env.APPDATA;
+  process.env.APPDATA = path.join(home, '.config');
 });
 
 afterEach(() => {
   paths.HOME = originalHome;
+  if (originalAppData === undefined) delete process.env.APPDATA;
+  else process.env.APPDATA = originalAppData;
+  if (originalXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+  else process.env.XDG_CONFIG_HOME = originalXdg;
   fs.rmSync(home, { recursive: true, force: true });
 });
 
@@ -52,6 +79,22 @@ function readJson(file) {
   return JSON.parse(fs.readFileSync(file, 'utf8'));
 }
 
+test('OpenCode uses .config on Windows even when APPDATA points elsewhere', () => {
+  process.env.APPDATA = path.join(home, 'Roaming');
+  const wasWindows = paths.IS_WINDOWS;
+  paths.IS_WINDOWS = true;
+  try {
+    assert.equal(opencode.configFile(), path.join(home, '.config', 'opencode', 'opencode.json'));
+    assert.ok(require('../lib/skills').targetDirs().includes(path.join(home, '.config', 'opencode', 'skills')));
+  } finally { paths.IS_WINDOWS = wasWindows; }
+});
+
+test('OpenCode MCP registration and skills honor the same XDG override', () => {
+  process.env.XDG_CONFIG_HOME = path.join(home, 'custom-config');
+  assert.equal(opencode.configFile(), path.join(home, 'custom-config', 'opencode', 'opencode.json'));
+  assert.ok(require('../lib/skills').targetDirs().includes(path.join(home, 'custom-config', 'opencode', 'skills')));
+});
+
 // -- commandcode ------------------------------------------------------------
 
 test('commandcode adds the transport and enabled keys its schema needs', () => {
@@ -60,8 +103,8 @@ test('commandcode adds the transport and enabled keys its schema needs', () => {
   const entry = readJson(file).mcpServers['jev-use'];
   assert.equal(entry.transport, 'stdio');
   assert.equal(entry.enabled, true);
-  assert.equal(entry.command, ENTRY.command);
-  assert.deepEqual(entry.args, ENTRY.args);
+  assert.equal(entry.command, COMMANDCODE_ENTRY.command);
+  assert.deepEqual(entry.args, COMMANDCODE_ENTRY.args);
 });
 
 test('commandcode preserves other servers already configured', () => {
@@ -235,10 +278,10 @@ test('opencode uses its own shape: command array plus environment', () => {
     args: ['/opt/mcp.js'],
     env: { FOO: 'bar' },
   });
-  const entry = readJson(file).mcp['jev-use'];
+  const entry = readJson(file).mcp.servers['jev-use'];
   assert.equal(entry.type, 'local');
   assert.deepEqual(entry.command, ['/usr/bin/node', '/opt/mcp.js']);
-  assert.equal(entry.enabled, true);
+  assert.equal(entry.disabled, false);
   assert.deepEqual(entry.environment, { FOO: 'bar' });
 });
 
@@ -253,7 +296,7 @@ test('opencode preserves other mcp entries and other config blocks', () => {
   const config = readJson(file);
   assert.equal(config.theme, 'dark');
   assert.ok(config.mcp.other);
-  assert.ok(config.mcp['jev-use']);
+  assert.ok(config.mcp.servers['jev-use']);
 });
 
 test('opencode refuses a jsonc file with comments instead of eating them', () => {
@@ -268,6 +311,19 @@ test('opencode refuses a jsonc file with comments instead of eating them', () =>
   );
 });
 
+test('opencode replaces its legacy entry while preserving other nested servers', () => {
+  const file = path.join(home, '.config', 'opencode', 'opencode.json');
+  write(file, JSON.stringify({ mcp: {
+    'jev-use': { type: 'local', command: ['old-command'] },
+    servers: { other: { type: 'local', command: ['keep-me'] } },
+  } }));
+  opencode.register(ENTRY);
+  const config = readJson(file);
+  assert.equal(config.mcp['jev-use'], undefined);
+  assert.deepEqual(config.mcp.servers.other.command, ['keep-me']);
+  assert.deepEqual(config.mcp.servers['jev-use'].command, [ENTRY.command, ...ENTRY.args]);
+});
+
 // -- reading a registration back --------------------------------------------
 //
 // Doctor decides whether a device is healthy from this, so it has to describe
@@ -277,7 +333,7 @@ test('opencode refuses a jsonc file with comments instead of eating them', () =>
 test('commandcode reads its own entry back, command and args', () => {
   fs.mkdirSync(path.join(home, '.commandcode'), { recursive: true });
   commandcode.register(ENTRY);
-  assert.deepEqual(commandcode.registered(), ENTRY);
+  assert.deepEqual(commandcode.registered(), COMMANDCODE_ENTRY);
 });
 
 test('codex reads its block back, including the args array', () => {
