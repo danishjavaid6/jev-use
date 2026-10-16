@@ -9,6 +9,9 @@ const { test, beforeEach, afterEach } = require('node:test');
 const paths = require('../lib/paths');
 const lifecycle = require('../lib/lifecycle');
 const installer = require('../lib/installer');
+// Resolve before the tests redirect stateDir to an empty installation. A
+// delivery worktree can legitimately use the machine's installed runtime.
+const installedPython = require('../lib/runtime').resolve();
 
 let dir, original;
 beforeEach(() => {
@@ -59,8 +62,8 @@ test('session guard works across processes/checkouts and reclaims a dead launche
 });
 
 test('actual Node/Python launcher owns its lifecycle record until graceful EOF', { timeout: 15000 }, async (t) => {
-  if (!require('../lib/runtime').resolve()) return t.skip('Python runtime not installed');
-  const code = `const paths=require(${JSON.stringify(require.resolve('../lib/paths'))});paths.stateDir=()=>process.argv[1];require(${JSON.stringify(require.resolve('../bin/jev-use-mcp.js'))});`;
+  if (!installedPython) return t.skip('Python runtime not installed');
+  const code = `const paths=require(${JSON.stringify(require.resolve('../lib/paths'))});paths.stateDir=()=>process.argv[1];require(${JSON.stringify(require.resolve('../lib/runtime'))}).resolve=()=>${JSON.stringify(installedPython)};require(${JSON.stringify(require.resolve('../bin/jev-use-mcp.js'))});`;
   const child = spawn(process.execPath, ['-e', code, dir], { stdio: ['pipe', 'pipe', 'pipe'] });
   let stderr = '';
   child.stderr.on('data', chunk => { stderr += chunk; });
