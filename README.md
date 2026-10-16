@@ -11,6 +11,18 @@ Jev SDK, and the driver fallback. It registers detected harnesses in their
 user configuration and installs `/browser-use` and `/mobile-use` globally.
 No repository folder needs to be open when using the tools.
 
+Package-manager lifecycle hooks do not configure the machine. After installing
+the package, run `jev-use install` explicitly. Pause any running job, save/close
+its profile and disconnect jev-use MCP sessions before installation. The installer
+refuses to change shared configuration/runtime while a launcher is connected,
+including launchers from another checkout. `--force` does not bypass this guard.
+
+A normal MCP disconnect pauses the saved job, drains the current action and
+saves/closes its GoLogin profile. Reconnect, read `browser_facebook_run` status,
+then resume the same run ID when continuing the authorized job. Inspect live
+state before acting; never replay an uncertain Create click. Hard process kills
+and machine/network failures can still require manual inspection.
+
 Linux/macOS:
 
 ```bash

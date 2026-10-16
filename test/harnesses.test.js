@@ -32,6 +32,18 @@ const COMMANDCODE_ENTRY = paths.IS_WINDOWS
   ? { command: commandcode.quoteWindows(ENTRY.command), args: ENTRY.args.map(commandcode.quoteWindows) }
   : ENTRY;
 
+test('repeating identical registration does not touch watched configuration files', () => {
+  for (const harness of registry.ALL) {
+    const file = harness.register(ENTRY);
+    const text = fs.readFileSync(file, 'utf8');
+    const old = new Date('2020-01-01T00:00:00Z');
+    fs.utimesSync(file, old, old);
+    harness.register(ENTRY);
+    assert.equal(fs.readFileSync(file, 'utf8'), text, harness.id);
+    assert.equal(fs.statSync(file).mtimeMs, old.getTime(), harness.id + ' must not trigger a config reload');
+  }
+});
+
 let home;
 let originalHome;
 let originalAppData;

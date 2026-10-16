@@ -125,7 +125,11 @@ def _payload(text: str) -> dict:
     if text.startswith("port="):
         text = text.split("\n", 1)[1]
     value = json.loads(text)
-    if not isinstance(value, dict) or value.get("ok") is False:
+    if isinstance(value, dict) and value.get("ok") is False:
+        # Preserve a useful category without returning raw browser/SDK payloads.
+        failure = _read_failure(RuntimeError(str(value.get("error", ""))))
+        raise RuntimeError(failure["code"])
+    if not isinstance(value, dict):
         raise ValueError("Backend did not return a successful structured observation")
     result = value.get("result", value)
     if not isinstance(result, dict):
@@ -370,11 +374,12 @@ def _advance(args, *, owner, open_profile, close_profile, action, prepare_profil
                      diagnostic_tool="browser_facebook_vision")
     try:
         result = _payload(action({**call, "action": next_action}))
-    except Exception:
+    except Exception as exc:
         if next_action == "correct_password":
             forget(run_id)
         runs.task_progress(run_id, profile_id, failure={**signature, "count": previous.get("count", 0) + 1 if same else 1})
-        return reply("continue", **context, performed=next_action, outcome="requires_fresh_inspection")
+        return reply("continue", **context, performed=next_action, outcome="requires_fresh_inspection",
+                     action_failure=_read_failure(exc))
     runs.task_progress(run_id, profile_id, clear_failure=True)
     if next_action == "correct_password":
         _password(run_id, args["corrected_password"])
